@@ -15,6 +15,7 @@ from ..application.contracts import (
     ReadUpdate, SessionState, Target, Value,
 )
 from .io_bridge import IoBridge
+from .widgets import add_field
 
 
 class ProtocolForm(Protocol):
@@ -49,8 +50,11 @@ class Rows[T](QAbstractTableModel):
         return 0 if parent.isValid() else len(self.headers)
 
     def headerData(self, section, orientation, role):
-        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole:
-            return self.headers[section]
+        if orientation == Qt.Orientation.Horizontal:
+            if role == Qt.ItemDataRole.DisplayRole:
+                return self.headers[section]
+            if role == Qt.ItemDataRole.TextAlignmentRole and section in self.right_aligned:
+                return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         return None
 
     def data(self, index, role):
@@ -81,19 +85,30 @@ def _table(model: Rows) -> QTableView:
     table = QTableView()
     table.setModel(model)
     table.verticalHeader().hide()
+    table.verticalHeader().setDefaultSectionSize(27)
+    table.setShowGrid(False)
+    table.setWordWrap(False)
     table.setAlternatingRowColors(True)
     table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
     table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+    table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
     table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
     table.horizontalHeader().setStretchLastSection(True)
     return table
+
+
+def _heading(title: str) -> QLabel:
+    label = QLabel(title)
+    label.setObjectName("sectionTitle")
+    return label
 
 
 def _panel():
     widget = QFrame()
     widget.setObjectName("panel")
     layout = QVBoxLayout(widget)
-    layout.setContentsMargins(14, 10, 14, 10)
+    layout.setContentsMargins(14, 8, 14, 10)
+    layout.setSpacing(7)
     return widget, layout
 
 
@@ -106,7 +121,7 @@ class MainWindow(QMainWindow):
     def __init__(self, bridge: IoBridge, protocols: tuple[DesktopProtocol, ...]):
         super().__init__()
         self.setWindowTitle("工业协议调试台")
-        self.resize(1120, 760)
+        self.resize(1120, 800)
         self.setMinimumWidth(640)
         self._bridge = bridge
         self._protocols = protocols
@@ -127,7 +142,9 @@ class MainWindow(QMainWindow):
             form.query.changed.connect(self._query_changed)
 
         self.connection_button = QPushButton("连接")
+        self.connection_button.setMinimumWidth(96)
         self.connection_status = QLabel()
+        self.connection_status.setObjectName("connectionStatus")
         self.read_button = QPushButton("读取")
         self.read_button.setObjectName("primary")
         self.write_button = QPushButton("写入…")
@@ -139,12 +156,16 @@ class MainWindow(QMainWindow):
         self.interval.setSuffix(" ms")
         self.interval.setToolTip("两次读取之间的等待时间")
         self.result_context = QLabel()
+        self.result_context.setObjectName("resultContext")
         self.feedback = QLabel()
+        self.feedback.setObjectName("feedback")
         self.feedback.setWordWrap(True)
         self.feedback.setTextFormat(Qt.TextFormat.PlainText)
         self.detail = QPlainTextEdit()
+        self.detail.setObjectName("packetDetail")
+        self.detail.setAccessibleName("TX / RX 报文详情")
         self.detail.setReadOnly(True)
-        self.detail.setMaximumHeight(112)
+        self.detail.setFixedHeight(80)
         self.detail.setPlaceholderText("选择一条日志查看详情和 TX/RX 字节")
 
         self.results = Rows[Point](
@@ -156,8 +177,11 @@ class MainWindow(QMainWindow):
             ("时间", "操作", "目标", "功能码", "耗时", "结果"), _journal_row, (4,),
         )
         self.result_table = _table(self.results)
+        self.result_table.setAccessibleName("读取结果")
         self.result_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.result_table.horizontalHeader().setStretchLastSection(False)
         self.log_table = _table(self.journal)
+        self.log_table.setAccessibleName("请求日志")
         self.log_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._build()
 
@@ -183,55 +207,74 @@ class MainWindow(QMainWindow):
         root = QWidget()
         root.setObjectName("workspace")
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        masthead = QFrame()
+        masthead.setObjectName("masthead")
+        header = QHBoxLayout(masthead)
+        header.setContentsMargins(18, 9, 18, 9)
+        header.setSpacing(10)
+        icon = self.windowIcon()
+        if not icon.isNull():
+            mark = QLabel()
+            mark.setPixmap(icon.pixmap(36, 36))
+            header.addWidget(mark)
         title = QLabel("工业协议调试台")
         title.setObjectName("title")
-        header = QHBoxLayout()
         header.addWidget(title, 1)
         header.addWidget(self.connection_status)
-        layout.addLayout(header)
+        layout.addWidget(masthead)
+
+        body = QVBoxLayout()
+        body.setContentsMargins(16, 12, 16, 12)
+        body.setSpacing(8)
+        layout.addLayout(body, 1)
 
         connection, connection_layout = _panel()
+        connection_layout.addWidget(_heading("设备连接"))
         settings = QHBoxLayout()
-        protocol_label = QLabel("协议")
-        protocol_label.setBuddy(self.protocol)
-        settings.addWidget(protocol_label)
-        settings.addWidget(self.protocol)
+        settings.setSpacing(10)
+        add_field(settings, "协议", self.protocol)
         settings.addWidget(self.connection_forms, 1)
         settings.addWidget(self.connection_button, alignment=Qt.AlignmentFlag.AlignBottom)
         connection_layout.addLayout(settings)
-        layout.addWidget(connection)
+        body.addWidget(connection)
 
         query, query_layout = _panel()
+        query_layout.addWidget(_heading("点位操作"))
         query_layout.addWidget(self.query_forms)
         actions = QHBoxLayout()
-        actions.addWidget(self.feedback, 1)
+        actions.setSpacing(8)
         actions.addWidget(self.read_button)
         actions.addWidget(self.write_button)
-        interval_label = QLabel("间隔")
+        actions.addStretch(1)
+        interval_label = QLabel("轮询间隔")
+        interval_label.setObjectName("fieldLabel")
         interval_label.setBuddy(self.interval)
         actions.addWidget(interval_label)
         actions.addWidget(self.interval)
         actions.addWidget(self.poll_button)
         query_layout.addLayout(actions)
-        layout.addWidget(query)
+        query_layout.addWidget(self.feedback)
+        body.addWidget(query)
 
         results, result_layout = _panel()
         result_title = QHBoxLayout()
-        result_title.addWidget(QLabel("读取结果"), 1)
+        result_title.addWidget(_heading("读取结果"), 1)
         result_title.addWidget(self.result_context)
         result_layout.addLayout(result_title)
         result_layout.addWidget(self.result_table)
         journal, journal_layout = _panel()
-        journal_layout.addWidget(QLabel("请求日志"))
+        journal_layout.addWidget(_heading("请求日志"))
         journal_layout.addWidget(self.log_table)
         journal_layout.addWidget(self.detail)
         split = QSplitter(Qt.Orientation.Vertical)
         split.addWidget(results)
         split.addWidget(journal)
         split.setChildrenCollapsible(False)
-        split.setSizes([320, 245])
-        layout.addWidget(split, 1)
+        split.setHandleWidth(8)
+        split.setSizes([215, 245])
+        body.addWidget(split, 1)
         self.setCentralWidget(root)
 
     def _protocol_changed(self, index):
@@ -254,6 +297,7 @@ class MainWindow(QMainWindow):
                 config, endpoint = self._form.connection_config()
             except ClientError as error:
                 self.feedback.setText(str(error))
+                self._refresh()
                 return
             self._query_changed()
             self._state = SessionState(ConnectionState.CONNECTING, endpoint)
@@ -321,6 +365,13 @@ class MainWindow(QMainWindow):
         self.connection_status.setText(
             f"{state.connection} · {state.endpoint}" if state.endpoint else state.connection
         )
+        tone = "online" if online else "offline" if offline else "pending"
+        if self.connection_status.property("tone") != tone:
+            self.connection_status.setProperty("tone", tone)
+            style = self.connection_status.style()
+            style.unpolish(self.connection_status)
+            style.polish(self.connection_status)
+        self.feedback.setVisible(bool(self.feedback.text()))
         self.connection_button.setText("断开连接" if online else "连接")
         self.connection_button.setEnabled((online or offline) and not self._closing)
         self.protocol.setEnabled(offline and len(self._forms) > 1 and not self._closing)
@@ -352,16 +403,3 @@ class MainWindow(QMainWindow):
         self._closing = True
         self._refresh()
         self._bridge.shutdown()
-
-
-STYLE = """
-QWidget#workspace { background: #e9eff4; }
-QFrame#panel { background: #ffffff; border: 1px solid #d3dee8; border-radius: 5px; }
-QLabel { color: #182a3d; }
-QLabel#title { color: #18364e; font-size: 21px; font-weight: bold; }
-QLabel#warning, QPushButton#write:enabled { color: #9a4e16; }
-QPushButton { padding: 5px 12px; }
-QPushButton#primary:enabled { background: #12618a; color: white; border: 1px solid #12618a; border-radius: 3px; }
-QPushButton#primary:focus { border: 2px solid #182a3d; }
-QTableView { alternate-background-color: #f4f8fb; gridline-color: #e3ebf2; }
-"""

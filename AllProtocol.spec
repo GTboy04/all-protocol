@@ -2,10 +2,12 @@
 
 from pathlib import Path
 
-icon = Path(SPECPATH) / "src" / "all_protocol" / "assets" / "app-icon.ico"
+assets = Path(SPECPATH) / "src" / "all_protocol" / "assets"
+icon = assets / "app-icon.ico"
 a = Analysis(
     ["src/all_protocol/__main__.py"],
-    datas=[(str(icon), "all_protocol/assets")],
+    datas=[(str(assets / name), "all_protocol/assets")
+           for name in ("app-icon.ico", "chevron-up.svg", "chevron-down.svg")],
 )
 
 # Qt on Windows links to the OS ICU ABI. PATH can expose a same-named ICU

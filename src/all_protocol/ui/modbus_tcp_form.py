@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 
 from ..adapters.modbus_tcp.model import RULES, Area, ModbusTarget, ModbusTcpConfig
 from ..application.contracts import ClientError, Command, Target, Value
+from .widgets import add_field
 
 
 def spinbox(minimum, maximum, value):
@@ -43,15 +44,6 @@ class ModbusTcpForm:
         return dialog.values if dialog.exec() == QDialog.DialogCode.Accepted else None
 
 
-def _field(layout, caption, control, stretch=0):
-    group = QVBoxLayout()
-    label = QLabel(caption)
-    label.setBuddy(control)
-    group.addWidget(label)
-    group.addWidget(control)
-    layout.addLayout(group, stretch)
-
-
 class _ConnectionForm(QWidget):
     def __init__(self):
         super().__init__()
@@ -61,9 +53,10 @@ class _ConnectionForm(QWidget):
         self.timeout = spinbox(100, 30000, 3000)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        _field(layout, "主机", self.host, 1)
-        _field(layout, "端口", self.port)
-        _field(layout, "超时（ms）", self.timeout)
+        layout.setSpacing(10)
+        add_field(layout, "主机", self.host, 1)
+        add_field(layout, "端口", self.port)
+        add_field(layout, "超时（ms）", self.timeout)
 
 
 class _QueryForm(QWidget):
@@ -79,14 +72,17 @@ class _QueryForm(QWidget):
         self.offset = spinbox(0, 65535, 0)
         self.count = spinbox(1, 125, 4)
         self.permissions = QLabel()
+        self.permissions.setObjectName("permissions")
         self.permissions.setWordWrap(True)
         fields = QHBoxLayout()
-        _field(fields, "Unit ID", self.unit)
-        _field(fields, "数据区", self.area, 1)
-        _field(fields, "起始偏移", self.offset)
-        _field(fields, "数量", self.count)
+        fields.setSpacing(10)
+        add_field(fields, "Unit ID", self.unit)
+        add_field(fields, "数据区", self.area, 1)
+        add_field(fields, "起始偏移", self.offset)
+        add_field(fields, "数量", self.count)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
         layout.addLayout(fields)
         layout.addWidget(self.permissions)
         self.area.currentIndexChanged.connect(self._changed)
@@ -123,11 +119,13 @@ class _WriteDialog(QDialog):
         self.values: tuple[Value, ...] | None = None
         self.input = QPlainTextEdit()
         self.input.setPlaceholderText("输入十进制值，用逗号、空格或换行分隔")
+        self.input.setAccessibleName("写入值")
         self.error = QLabel()
         self.error.setObjectName("warning")
         self.error.setWordWrap(True)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("确认写入")
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setObjectName("write")
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -136,6 +134,8 @@ class _WriteDialog(QDialog):
         form.addRow("点位范围", QLabel(target.label))
         form.addRow("值的数量", QLabel(str(target.count)))
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
         layout.addLayout(form)
         layout.addWidget(self.input)
         layout.addWidget(self.error)

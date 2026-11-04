@@ -7,8 +7,9 @@ from PySide6.QtWidgets import QApplication
 from all_protocol.adapters.modbus_tcp.client import ModbusTcpClient
 from all_protocol.application.contracts import ProtocolRegistration
 from all_protocol.ui.io_bridge import IoBridge
-from all_protocol.ui.main_window import STYLE, DesktopProtocol, MainWindow
+from all_protocol.ui.main_window import DesktopProtocol, MainWindow
 from all_protocol.ui.modbus_tcp_form import ModbusTcpForm
+from all_protocol.ui.style import STYLE
 
 
 def main() -> int:
