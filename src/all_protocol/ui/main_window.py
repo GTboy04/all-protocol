@@ -7,7 +7,7 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSignalBlocker, Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
-    QMainWindow, QPlainTextEdit, QPushButton, QSpinBox, QSplitter,
+    QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QSplitter,
     QStackedWidget, QTableView, QVBoxLayout, QWidget,
 )
 
@@ -150,6 +150,8 @@ class MainWindow(QMainWindow):
         self.recent_connections.setMinimumContentsLength(17)
         self.recent_connections.setMaximumWidth(320)
         self.recent_connections.setToolTip("选择设备后填入连接配置，再点击连接")
+        self.delete_recent_button = QPushButton("删除记录…")
+        self.delete_recent_button.setToolTip("删除选中的最近连接记录")
         self.connection_forms = QStackedWidget()
         self.query_forms = QStackedWidget()
         for item, form in zip(protocols, self._forms, strict=True):
@@ -204,6 +206,7 @@ class MainWindow(QMainWindow):
 
         self.protocol.currentIndexChanged.connect(self._protocol_changed)
         self.recent_connections.activated.connect(self._select_profile)
+        self.delete_recent_button.clicked.connect(self._delete_profile)
         self.connection_button.clicked.connect(self._toggle_connection)
         self.read_button.clicked.connect(self._read)
         self.write_button.clicked.connect(self._write)
@@ -253,7 +256,12 @@ class MainWindow(QMainWindow):
         connection_header = QHBoxLayout()
         connection_header.addWidget(_heading("设备连接"), 1)
         if self._history is not None:
+            recent_label = QLabel("最近连接")
+            recent_label.setObjectName("fieldLabel")
+            recent_label.setBuddy(self.recent_connections)
+            connection_header.addWidget(recent_label)
             connection_header.addWidget(self.recent_connections)
+            connection_header.addWidget(self.delete_recent_button)
         connection_layout.addLayout(connection_header)
         settings = QHBoxLayout()
         settings.setSpacing(10)
@@ -327,13 +335,13 @@ class MainWindow(QMainWindow):
                 label = f"{self.protocol.itemText(index)} · {profile.endpoint}"
                 self.recent_connections.addItem(label, profile)
         self.recent_connections.setPlaceholderText(
-            "最近连接" if self.recent_connections.count() else "暂无连接记录"
+            "选择设备" if self.recent_connections.count() else "暂无连接记录"
         )
         self.recent_connections.setCurrentIndex(-1)
 
     def _select_profile(self, index: int):
         profile = self.recent_connections.itemData(index)
-        self.recent_connections.setCurrentIndex(-1)
+        self.recent_connections.setCurrentIndex(index)
         protocol_index = self.protocol.findData(profile.protocol)
         form = self._forms[protocol_index]
         try:
@@ -341,10 +349,36 @@ class MainWindow(QMainWindow):
                 form.restore_profile(profile.fields)
         except (ClientError, KeyError, ValueError):
             self._history_failure("无法恢复此连接记录，请检查配置")
+            self._refresh()
             return
         self.protocol.setCurrentIndex(protocol_index)
         self.interval.setValue(profile.interval_ms)
         self._query_changed()
+
+    def _delete_profile(self):
+        profile = self.recent_connections.currentData()
+        if self._history is None or profile is None:
+            return
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("删除连接记录")
+        dialog.setTextFormat(Qt.TextFormat.PlainText)
+        dialog.setText(f"删除这条最近连接记录？\n{self.recent_connections.currentText()}")
+        delete_button = dialog.addButton("删除", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_button = dialog.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(cancel_button)
+        dialog.setEscapeButton(cancel_button)
+        dialog.exec()
+        confirmed = dialog.clickedButton() is delete_button
+        dialog.deleteLater()
+        if not confirmed:
+            return
+        try:
+            profiles = self._history.forget(profile)
+        except OSError:
+            self._history_failure("无法删除最近连接记录")
+            return
+        self._show_profiles(profiles)
+        self._refresh()
 
     def _remember_connection(self, endpoint: str):
         form = self._form
@@ -358,6 +392,7 @@ class MainWindow(QMainWindow):
             return
         if profiles != self._profiles:
             self._show_profiles(profiles)
+        self.recent_connections.setCurrentIndex(0)
 
     def _protocol_changed(self, index):
         self.connection_forms.setCurrentIndex(index)
@@ -470,7 +505,9 @@ class MainWindow(QMainWindow):
         self.connection_button.setText("断开连接" if online else "连接")
         self.connection_button.setEnabled((online or offline) and not self._closing)
         self.protocol.setEnabled(offline and len(self._forms) > 1 and not self._closing)
-        self.recent_connections.setEnabled(offline and not self._closing and self.recent_connections.count() > 0)
+        history_available = offline and not self._closing
+        self.recent_connections.setEnabled(history_available and self.recent_connections.count() > 0)
+        self.delete_recent_button.setEnabled(history_available and self.recent_connections.currentIndex() >= 0)
         self.connection_forms.setEnabled(offline and not self._closing)
         self.query_forms.setEnabled((offline or idle) and not self._closing)
         self.read_button.setEnabled(idle)

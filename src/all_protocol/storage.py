@@ -23,6 +23,10 @@ class ConnectionProfile:
     fields: ProfileFields
     interval_ms: int
 
+    @property
+    def key(self) -> tuple[str, str]:
+        return self.protocol, self.endpoint
+
 
 def _json_bytes(record: dict) -> bytes:
     return (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
@@ -96,15 +100,25 @@ class LocalHistory:
         with self._locked():
             return self._read_profiles()
 
+    def _write_profiles(self, profiles: tuple[ConnectionProfile, ...]):
+        contents = json.dumps([asdict(item) for item in profiles], ensure_ascii=False, indent=2)
+        _replace_file(self.profiles_path, (contents + "\n").encode("utf-8"))
+
     def remember(self, profile: ConnectionProfile) -> tuple[ConnectionProfile, ...]:
         with self._locked():
             profiles = self._read_profiles()
             if profiles and profiles[0] == profile:
                 return profiles
-            updated = (profile,) + tuple(item for item in profiles
-                                        if (item.protocol, item.endpoint) != (profile.protocol, profile.endpoint))
-            contents = json.dumps([asdict(item) for item in updated], ensure_ascii=False, indent=2)
-            _replace_file(self.profiles_path, (contents + "\n").encode("utf-8"))
+            updated = (profile,) + tuple(item for item in profiles if item.key != profile.key)
+            self._write_profiles(updated)
+            return updated
+
+    def forget(self, profile: ConnectionProfile) -> tuple[ConnectionProfile, ...]:
+        with self._locked():
+            profiles = self._read_profiles()
+            updated = tuple(item for item in profiles if item.key != profile.key)
+            if updated != profiles:
+                self._write_profiles(updated)
             return updated
 
     def recent_entries(self) -> tuple[JournalEntry, ...]:

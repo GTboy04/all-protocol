@@ -1,9 +1,9 @@
 from dataclasses import dataclass
 from time import monotonic
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QTimer, Signal
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
 from all_protocol.adapters.modbus_tcp.model import Area, ModbusTarget, ModbusTcpConfig
 from all_protocol.application.contracts import ConnectionState, Point, ProtocolRegistration
@@ -122,6 +122,7 @@ def test_window_restores_devices_and_packet_log_without_connecting(monkeypatch, 
         window.connection_button.click()
         wait_for(window.read_button.isEnabled)
         assert not window.recent_connections.isEnabled()
+        assert not window.delete_recent_button.isEnabled()
         window.connection_button.click()
         wait_for(lambda: window.recent_connections.isEnabled())
 
@@ -163,6 +164,24 @@ def test_window_restores_devices_and_packet_log_without_connecting(monkeypatch, 
         window.recent_connections.activated.emit(1)
         assert window._form.connection_config()[0] == ModbusTcpConfig("192.0.2.1")
         assert len(connections) == 2
+
+        def choose(role):
+            dialog = app.activeModalWidget()
+            next(button for button in dialog.buttons() if dialog.buttonRole(button) == role).click()
+
+        history = LocalHistory(tmp_path)
+        profiles, entries = history.profiles(), history.recent_entries()
+        QTimer.singleShot(0, lambda: choose(QMessageBox.ButtonRole.RejectRole))
+        window.delete_recent_button.click()
+        assert history.profiles() == profiles
+
+        QTimer.singleShot(0, lambda: choose(QMessageBox.ButtonRole.DestructiveRole))
+        window.delete_recent_button.click()
+        assert window.recent_connections.count() == 1
+        assert not window.delete_recent_button.isEnabled()
+        assert LocalHistory(tmp_path).profiles() == profiles[:1]
+        assert history.recent_entries() == entries
+        assert window._form.connection_config()[0] == ModbusTcpConfig("192.0.2.1")
         window.close()
         wait_for(lambda: not window.isVisible())
     finally:

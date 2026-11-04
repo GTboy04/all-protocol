@@ -14,6 +14,10 @@ def test_profiles_merge_by_protocol_and_endpoint(tmp_path):
     LocalHistory(tmp_path).remember(other_protocol)
     LocalHistory(tmp_path).remember(updated)
     assert LocalHistory(tmp_path).profiles() == (updated, other_protocol)
+    assert LocalHistory(tmp_path).forget(modbus) == (other_protocol,)
+    assert LocalHistory(tmp_path).forget(modbus) == (other_protocol,)
+    assert LocalHistory(tmp_path).forget(other_protocol) == ()
+    assert LocalHistory(tmp_path).profiles() == ()
 
 
 def test_journal_clears_on_overflow_without_removing_profiles(tmp_path, monkeypatch):
