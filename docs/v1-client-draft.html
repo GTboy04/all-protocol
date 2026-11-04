@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>工业协议调试台 · V1 界面草稿</title>
+<style>
+  :root { color-scheme: light; --ink:#182a3d; --muted:#4a6074; --line:#d3dee8; --paper:#fff; --bench:#e9eff4; --blue:#12618a; --green:#14745c; --amber:#9a4e16 }
+  * { box-sizing:border-box }
+  body { margin:0; color:var(--ink); background:var(--bench); font:14px/1.5 "Microsoft YaHei UI","Microsoft YaHei",sans-serif }
+  .mono, td, input[type=number] { font-variant-numeric:tabular-nums; font-family:Consolas,"Microsoft YaHei UI",monospace }
+  header { background:#18364e; color:#fff; border-bottom:3px solid #4596b3 }
+  .bar, main { max-width:1260px; margin:auto; padding-inline:28px }
+  .bar { display:flex; align-items:center; justify-content:space-between; gap:18px; min-height:74px }
+  .brand { display:flex; align-items:center; gap:13px }
+  .mark { display:grid; place-items:center; width:38px; height:38px; border:1px solid #78aabd; border-radius:5px; color:#a5d7e3 }
+  h1,h2,p { margin:0 }
+  h1 { font-size:20px; letter-spacing:.04em }
+  h2 { font-size:16px }
+  .sub { font-size:12px; color:#c4dce8 }
+  #connection { color:#b9f0dc }
+  #connection.offline { color:#d3e1eb }
+  main { padding-block:20px 24px; display:grid; gap:14px }
+  section { background:var(--paper); border:1px solid var(--line); border-radius:6px; min-width:0 }
+  .fields { display:flex; flex-wrap:wrap; align-items:end; gap:12px; padding:13px 16px }
+  label { display:grid; gap:5px; color:var(--muted); font-size:12px }
+  input,select,button { font:inherit; border:1px solid #b9cad9; border-radius:4px; min-height:36px; background:white; color:var(--ink); padding:6px 9px }
+  input,select { width:100% }
+  input:disabled,select:disabled { background:#f2f6f9; color:#4e6377; opacity:1 }
+  button { cursor:pointer; white-space:nowrap; padding-inline:13px }
+  button:hover:not(:disabled) { border-color:var(--blue); box-shadow:0 0 0 1px var(--blue) }
+  button:disabled { cursor:default; color:#687a8a; background:#f2f6f9; border-color:var(--line) }
+  :focus-visible { outline:2px solid var(--blue); outline-offset:2px }
+  .primary:not(:disabled) { background:var(--blue); border-color:var(--blue); color:#fff }
+  .write:not(:disabled) { color:var(--amber); border-color:#cdab93 }
+  .actions { display:flex; align-items:end; flex-wrap:wrap; gap:8px; margin-left:auto }
+  .short { width:100px }
+  .medium { width:142px }
+  .wide { flex:1 1 185px; min-width:160px }
+  .info { border-top:1px solid var(--line); background:#f5f9fc; padding:8px 16px; color:var(--muted); display:flex; flex-wrap:wrap; gap:8px 16px }
+  .tag { border-radius:3px; background:#e1f2ed; color:var(--green); padding:0 7px; font-weight:700 }
+  .tag.readonly { background:#e4eef6; color:#214c6b }
+  .heading { display:flex; align-items:baseline; justify-content:space-between; flex-wrap:wrap; gap:6px 18px; padding:11px 16px; border-bottom:1px solid var(--line) }
+  .heading span,footer { color:var(--muted); font-size:12px }
+  .table-wrap { overflow:auto; max-height:246px }
+  table { width:100%; border-collapse:collapse; white-space:nowrap }
+  th,td { padding:7px 16px; text-align:left; border-bottom:1px solid #e4ecf2 }
+  th { color:var(--muted); font-size:12px; font-weight:600; background:#f4f7fa; position:sticky; top:0 }
+  tbody tr:nth-child(even) { background:#f8fafc }
+  .number { text-align:right }
+  .empty { text-align:center; color:var(--muted); padding:24px }
+  .success { color:var(--green) }
+  .warn { color:var(--amber) }
+  details { padding:7px 16px 10px }
+  summary { cursor:pointer; width:max-content; color:var(--blue) }
+  pre { white-space:pre-wrap; margin:8px 0 0 }
+  dialog { width:min(460px,calc(100% - 32px)); padding:20px; border:1px solid var(--line); border-radius:6px; color:var(--ink) }
+  dialog::backdrop { background:#182a3d80 }
+  dialog form { display:grid; gap:12px }
+  footer { display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px }
+  footer a { color:var(--blue) }
+  @media (max-width:700px) {
+    .bar,main { padding-inline:12px }
+    .bar { align-items:flex-start; flex-direction:column; padding-block:12px }
+    .actions { width:100%; margin-left:0 }
+    th,td { padding-inline:10px }
+  }
+</style>
+<header>
+  <div class="bar">
+    <div class="brand">
+      <div class="mark" aria-hidden="true"><svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M2 15h5V8h5v7h5V8h5" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></div>
+      <div><h1>工业协议调试台</h1><p class="sub">Modbus TCP 客户端 · V1 界面草稿</p></div>
+    </div>
+    <div id="connection" class="mono" role="status"></div>
+  </div>
+</header>
+<main>
+  <section aria-label="连接配置">
+    <div class="fields">
+      <label class="medium">协议<select aria-label="协议" disabled><option>Modbus TCP</option></select></label>
+      <label class="wide">主机<input id="host" value="127.0.0.1" required></label>
+      <label class="short">端口<input id="port" type="number" min="1" max="65535" value="1502" required></label>
+      <label class="medium">超时（ms）<input id="timeout" type="number" min="100" max="30000" value="3000" required></label>
+      <div class="actions"><button id="connect"></button></div>
+    </div>
+  </section>
+  <section aria-label="点位查询">
+    <div class="fields">
+      <label class="short">Unit ID<input id="unit" type="number" min="1" max="255" value="1" required></label>
+      <label class="medium">数据区<select id="area">
+        <option value="HR">HR 保持寄存器</option><option value="IR">IR 输入寄存器</option>
+        <option value="Coil">Coil 线圈</option><option value="DI">DI 离散输入</option>
+      </select></label>
+      <label class="short">起始偏移<input id="offset" type="number" min="0" max="65535" value="0" required></label>
+      <label class="short">数量<input id="count" type="number" min="1" value="4" required></label>
+      <div class="actions">
+        <button id="read" class="primary">读取</button><button id="write" class="write">写入…</button>
+        <label class="short">间隔（ms）<input id="interval" type="number" min="200" max="30000" value="1000" required></label>
+        <button id="poll">启动轮询</button>
+      </div>
+    </div>
+    <div class="info"><span id="permission" class="tag"></span><span id="functions"></span><span id="hint">地址从 0 开始</span></div>
+  </section>
+  <section aria-labelledby="results-title">
+    <div class="heading"><h2 id="results-title">读取结果</h2><span id="result-context" class="mono" aria-live="polite"></span></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col">地址偏移</th><th scope="col">点位</th><th scope="col" class="number">十进制值</th><th scope="col" class="number">十六进制</th></tr></thead>
+      <tbody id="values"></tbody>
+    </table></div>
+  </section>
+  <section aria-labelledby="log-title">
+    <div class="heading"><h2 id="log-title">请求日志</h2><span>最新事件在前</span></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th scope="col">时间</th><th scope="col">操作</th><th scope="col">目标</th><th scope="col">功能码</th><th scope="col" class="number">耗时</th><th scope="col">结果</th></tr></thead>
+      <tbody id="logs"></tbody>
+    </table></div>
+    <details><summary>查看示例收发字节</summary><pre>TX  00 01 00 00 00 06 01 03 00 00 00 04
+RX  00 01 00 00 00 0B 01 03 08 00 19 00 64 04 B0 00 00</pre></details>
+  </section>
+  <footer><span>界面草稿 · 连接、读写和轮询使用本地示例数据</span><a href="v1-development.md">开发文档</a></footer>
+</main>
+<dialog id="write-dialog" aria-labelledby="write-title">
+  <form id="write-form">
+    <h2 id="write-title">确认写入</h2>
+    <p id="write-target" class="mono"></p>
+    <label>新值（逗号分隔）<input id="write-values" required></label>
+    <p id="write-error" class="warn" role="status"></p>
+    <div class="actions"><button type="button" id="cancel">取消</button><button type="submit" class="write">确认写入</button></div>
+  </form>
+</dialog>
+<script>
+  const byId = id => document.getElementById(id);
+  const rules = {
+    HR: { read: "0x03", max: 125, write: ["0x06", "0x10"], writeMax: 123, word: true },
+    IR: { read: "0x04", max: 125, word: true },
+    Coil: { read: "0x01", max: 2000, write: ["0x05", "0x0F"], writeMax: 1968 },
+    DI: { read: "0x02", max: 2000 },
+  };
+  const addressFields = ["unit", "area", "offset", "count"];
+  const connectionFields = ["host", "port", "timeout"];
+  const memory = new Map();
+  let connected = true;
+  let timer = null;
+  let pendingWrite;
+
+  function target() {
+    return {
+      unit: byId("unit").valueAsNumber, area: byId("area").value,
+      offset: byId("offset").valueAsNumber, count: byId("count").valueAsNumber,
+    };
+  }
+
+  function label(point) {
+    return `站 ${point.unit} · ${point.area} · ${point.offset}–${point.offset + point.count - 1}`;
+  }
+
+  function endpoint() {
+    return `${byId("host").value}:${byId("port").value}`;
+  }
+
+  function update() {
+    const point = target();
+    const rule = rules[point.area];
+    const polling = timer !== null;
+    byId("count").max = rule.max;
+    const valid = addressFields.every(id => byId(id).validity.valid)
+      && point.offset + point.count <= 65536;
+    byId("connection").textContent = connected ? `● 已连接 · ${endpoint()}` : "○ 未连接";
+    byId("connection").classList.toggle("offline", !connected);
+    byId("connect").textContent = connected ? "断开连接" : "连接";
+    byId("connect").classList.toggle("primary", !connected);
+    byId("read").disabled = !connected || !valid || polling;
+    byId("write").disabled = !connected || !valid || polling || !rule.write || point.count > rule.writeMax;
+    byId("poll").disabled = !polling && (!connected || !valid || !byId("interval").validity.valid);
+    byId("poll").textContent = polling ? "停止轮询" : "启动轮询";
+    byId("permission").textContent = rule.write ? "可读写" : "只读";
+    byId("permission").classList.toggle("readonly", !rule.write);
+    byId("functions").textContent = rule.write
+      ? `读取 ${rule.read} · 写入 ${rule.write.join(" / ")} · 写入最多 ${rule.writeMax} 点`
+      : `读取 ${rule.read} · 最多 ${rule.max} 点`;
+    byId("hint").textContent = valid || polling ? "地址从 0 开始" : `检查站号、地址和数量（读取上限 ${rule.max}）`;
+    connectionFields.forEach(id => { byId(id).disabled = connected; });
+    [...addressFields, "interval"].forEach(id => { byId(id).disabled = polling; });
+  }
+
+  function addRow(table, cells, { prepend = false, numeric = [], success = false } = {}) {
+    const row = table.insertRow(prepend ? 0 : -1);
+    cells.forEach((value, index) => {
+      const cell = row.insertCell();
+      cell.textContent = value;
+      if (numeric.includes(index)) cell.classList.add("number");
+      if (success && index === cells.length - 1) cell.classList.add("success");
+    });
+  }
+
+  function time() {
+    return new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  }
+
+  function log(operation, location, code, duration, result) {
+    const table = byId("logs");
+    addRow(table, [time(), operation, location, code, duration, result], { prepend: true, numeric: [4], success: true });
+    if (table.rows.length > 500) table.deleteRow(-1);
+  }
+
+  function clearValues() {
+    const table = byId("values");
+    table.replaceChildren();
+    const cell = table.insertRow().insertCell();
+    cell.colSpan = 4;
+    cell.className = "empty";
+    cell.textContent = connected ? "选择数据区和地址后点击读取" : "先连接设备，再读取点位";
+    byId("result-context").textContent = "";
+  }
+
+  function memoryKey(point, offset) {
+    return `${endpoint()}/${point.unit}/${point.area}/${offset}`;
+  }
+
+  function read(point) {
+    const rule = rules[point.area];
+    const table = byId("values");
+    table.replaceChildren();
+    for (let index = 0; index < point.count; index++) {
+      const offset = point.offset + index;
+      const word = ([25, 100, 1200, 0][offset % 4] + point.unit - 1) % 65536;
+      const sample = rule.word ? word : (offset + point.unit) % 2;
+      const value = memory.get(memoryKey(point, offset)) ?? sample;
+      const hex = "0x" + value.toString(16).toUpperCase().padStart(rule.word ? 4 : 2, "0");
+      addRow(table, [offset, `${point.area}[${offset}]`, value, hex], { numeric: [2, 3] });
+    }
+    byId("result-context").textContent = `${label(point)} · ${time()}`;
+    log("读取", label(point), rule.read, "8 ms", `成功 · ${point.count} 点`);
+  }
+
+  function stopPolling() {
+    clearInterval(timer);
+    timer = null;
+  }
+
+  [...addressFields, ...connectionFields, "interval"].forEach(id => {
+    byId(id).addEventListener("input", () => {
+      if (addressFields.includes(id)) clearValues();
+      update();
+    });
+  });
+  byId("connect").onclick = () => {
+    if (!connected && !connectionFields.every(id => byId(id).reportValidity())) return;
+    connected = !connected;
+    stopPolling();
+    clearValues();
+    update();
+    log(connected ? "连接" : "断开", endpoint(), "—", "—", connected ? "已连接" : "已断开");
+  };
+  byId("read").onclick = () => read(target());
+  byId("poll").onclick = () => {
+    if (timer === null) {
+      const point = target();
+      read(point);
+      timer = setInterval(() => read(point), byId("interval").valueAsNumber);
+    } else {
+      stopPolling();
+    }
+    update();
+  };
+  byId("write").onclick = () => {
+    pendingWrite = target();
+    byId("write-target").textContent = `${endpoint()} · ${label(pendingWrite)}`;
+    byId("write-values").value = "";
+    byId("write-error").textContent = "";
+    byId("write-dialog").showModal();
+  };
+  byId("cancel").onclick = () => byId("write-dialog").close();
+  byId("write-form").onsubmit = event => {
+    event.preventDefault();
+    const point = pendingWrite;
+    const rule = rules[point.area];
+    const fields = byId("write-values").value.split(/[,，]/).map(value => value.trim());
+    const max = rule.word ? 65535 : 1;
+    const valid = fields.length === point.count && fields.every(value => /^\d+$/.test(value) && Number(value) <= max);
+    if (!valid) {
+      byId("write-error").textContent = `输入 ${point.count} 个 0–${max} 的整数`;
+      return;
+    }
+    fields.forEach((value, index) => memory.set(memoryKey(point, point.offset + index), Number(value)));
+    byId("write-dialog").close();
+    log("写入", label(point), rule.write[point.count === 1 ? 0 : 1], "9 ms", "设备已应答");
+  };
+  log("连接", endpoint(), "—", "3 ms", "已连接");
+  read(target());
+  update();
+</script>
+</html>
