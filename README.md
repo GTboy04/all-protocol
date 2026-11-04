@@ -17,9 +17,9 @@ uv run --locked python -m all_protocol
 
 ```powershell
 uv run --locked pytest -q
-uv run --locked --group release pyinstaller --noconfirm --onedir --windowed --name AllProtocol --specpath build src/all_protocol/__main__.py
+uv run --locked --group release pyinstaller --noconfirm AllProtocol.spec
 ```
 
-测试会在本机临时端口启动独立 TCP 测试服务。发布时复制或压缩整个 `dist/AllProtocol` 目录，解压后运行其中的 `AllProtocol.exe`。目录内附带 Python 运行时和 Qt 依赖。
+测试会在本机临时端口启动独立 TCP 测试服务。发布时复制或压缩整个 `dist/AllProtocol` 目录，解压后运行其中的 `AllProtocol.exe`。目录内附带 Python 运行时和 Qt 依赖。打包配置让 Qt 使用 Windows 自带的 ICU，避免构建机上其他软件的同名 DLL 进入发布包。
 
 新增协议时，实现 `application/contracts.py` 中的会话契约，为协议提供连接配置和目标表单，并在 `__main__.py` 中登记。连接生命周期、轮询与请求日志由通用会话层提供。 [V1 开发文档](docs/v1-development.md)
