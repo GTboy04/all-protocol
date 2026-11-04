@@ -4,7 +4,7 @@ from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSignalBlocker, Qt
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QSplitter,
@@ -44,11 +44,12 @@ class DesktopProtocol:
 
 class Rows[T](QAbstractTableModel):
     def __init__(self, headers: tuple[str, ...], format_row: Callable[[T], tuple[str, ...]],
-                 right_aligned: tuple[int, ...] = ()):
+                 right_aligned: tuple[int, ...] = (), monospace: tuple[int, ...] = ()):
         super().__init__()
         self.headers = headers
         self.format_row = format_row
         self.right_aligned = right_aligned
+        self.monospace = monospace
         self.items: list[T] = []
 
     def rowCount(self, parent=QModelIndex()):
@@ -72,6 +73,10 @@ class Rows[T](QAbstractTableModel):
             return self.format_row(self.items[index.row()])[index.column()]
         if role == Qt.ItemDataRole.TextAlignmentRole and index.column() in self.right_aligned:
             return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        if role == Qt.ItemDataRole.FontRole and index.column() in self.monospace:
+            font = QFont("Consolas")
+            font.setPixelSize(13)
+            return font
         return None
 
     def reset(self, items: tuple[T, ...] = ()):
@@ -127,13 +132,15 @@ def _journal_row(entry: JournalEntry) -> tuple[str, ...]:
 
 class MainWindow(QMainWindow):
     def __init__(self, bridge: IoBridge, protocols: tuple[DesktopProtocol, ...],
-                 history: LocalHistory | None = None):
+                 history: LocalHistory | None = None, return_home: Callable[[], None] | None = None):
         super().__init__()
         self.setWindowTitle("工业协议调试台")
         self.resize(1120, 800)
         self.setMinimumWidth(640)
         self._bridge = bridge
         self._history = history
+        self._return_home = return_home
+        self._going_home = False
         self._profiles: tuple[ConnectionProfile, ...] = ()
         self._protocols = protocols
         self._forms = tuple(item.create_form() for item in protocols)
@@ -236,6 +243,10 @@ class MainWindow(QMainWindow):
         header = QHBoxLayout(masthead)
         header.setContentsMargins(18, 9, 18, 9)
         header.setSpacing(10)
+        if self._return_home is not None:
+            home = QPushButton("返回首页")
+            home.clicked.connect(self._go_home)
+            header.addWidget(home)
         icon = self.windowIcon()
         if not icon.isNull():
             mark = QLabel()
@@ -524,8 +535,14 @@ class MainWindow(QMainWindow):
                 text += " · 旧数据"
         self.result_context.setText(text)
 
+    def _go_home(self):
+        self._going_home = True
+        self.close()
+
     def _io_stopped(self):
         self._stopped = True
+        if self._going_home:
+            self._return_home()
         self.close()
 
     def closeEvent(self, event: QCloseEvent):

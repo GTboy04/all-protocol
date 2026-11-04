@@ -13,10 +13,11 @@ class IoBridge(QObject):
     event = Signal(object)
     stopped = Signal()
 
-    def __init__(self):
+    def __init__(self, create_session=Session, close_session=Session.disconnect):
         super().__init__()
         self._loop = asyncio.new_event_loop()
-        self.session = Session(self.event.emit)
+        self.session = create_session(self.event.emit)
+        self._close_session = close_session
         self._stopping = False
         self._thread = Thread(target=self._run, name="protocol-io")
         self._thread.start()
@@ -46,7 +47,7 @@ class IoBridge(QObject):
         if self._stopping:
             return
         self._stopping = True
-        future = asyncio.run_coroutine_threadsafe(self.session.disconnect(), self._loop)
+        future = asyncio.run_coroutine_threadsafe(self._close_session(self.session), self._loop)
         future.add_done_callback(self._finish)
 
     def join(self):

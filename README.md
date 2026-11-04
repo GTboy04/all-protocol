@@ -1,6 +1,6 @@
 # 工业协议调试台
 
-Windows 桌面客户端。V1 通过 Modbus TCP 访问设备或网关，支持四区读取、HR 和 Coil 写入、定时读取、请求日志及 TX/RX 字节查看。
+Windows 桌面工业协议调试工具。启动时可选择客户端或服务端。客户端通过 Modbus TCP 访问设备或网关，支持四区读取、HR 和 Coil 写入、定时读取、请求日志及 TX/RX 字节查看。
 
 ## 开发启动
 
@@ -32,6 +32,12 @@ uv run --locked --group release pyinstaller --noconfirm AllProtocol.spec
 
 新增协议时，实现 `application/contracts.py` 中的会话契约，为协议提供连接配置和目标表单，并在 `__main__.py` 中登记。连接生命周期、轮询与请求日志由通用会话层提供。表单可实现 `profile_fields()` 和 `restore_profile()` 以接入最近连接。 [V1 开发文档](docs/v1-development.md)
 
-## 服务端设计
+## Modbus TCP 服务端
 
-Modbus TCP 服务端拟用于模拟多从站设备，供现有客户端、PLC 或上位机联调。[服务端设计文档](docs/modbus-tcp-server-design.md) · [角色选择与服务端界面草图](docs/modbus-tcp-server-draft.html)
+1. 在首页点击「进入服务端」，新增从站并为 HR、IR、Coil 或 DI 添加点位。偏移从 0 开始。
+2. 点击「启动服务」。本机默认监听 `127.0.0.1:1502`，可再打开一个实例进入客户端，用相同端口、Unit ID 和偏移访问点位。局域网联调时将监听地址改为本机网卡 IP。
+3. 监听中可在点位表修改当前值来模拟输入。客户端写入 HR 或 Coil 后，当前值会同步刷新。选中请求日志即可查看 RX 和 TX 报文。
+
+「保存方案」将监听参数、从站和点位初始值保存到 `%LOCALAPPDATA%\AllProtocol\modbus-tcp-server.json`。每次启动监听从初始值创建当前值。服务端日志独立保存在 `server-requests.jsonl`，沿用 5 MB 清理和最近 500 条的展示规则。
+
+[服务端设计文档](docs/modbus-tcp-server-design.md) · [角色选择与服务端界面草图](docs/modbus-tcp-server-draft.html)

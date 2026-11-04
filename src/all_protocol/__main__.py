@@ -8,10 +8,9 @@ from PySide6.QtWidgets import QApplication
 
 from all_protocol.adapters.modbus_tcp.client import ModbusTcpClient
 from all_protocol.application.contracts import ProtocolRegistration
-from all_protocol.storage import LocalHistory
-from all_protocol.ui.io_bridge import IoBridge
-from all_protocol.ui.main_window import DesktopProtocol, MainWindow
+from all_protocol.ui.main_window import DesktopProtocol
 from all_protocol.ui.modbus_tcp_form import ModbusTcpForm
+from all_protocol.ui.role_window import RoleWindow
 from all_protocol.ui.style import STYLE
 
 
@@ -27,14 +26,12 @@ def main() -> int:
         DesktopProtocol(ProtocolRegistration("modbus-tcp", "Modbus TCP", ModbusTcpClient, True), ModbusTcpForm),
     )
     data_dir = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation))
-    history = LocalHistory(data_dir / "AllProtocol")
-    bridge = IoBridge()
+    window = RoleWindow(protocols, data_dir / "AllProtocol")
     try:
-        window = MainWindow(bridge, protocols, history)
         window.show()
         return app.exec()
     finally:
-        bridge.join()
+        window.join()
 
 
 if __name__ == "__main__":
