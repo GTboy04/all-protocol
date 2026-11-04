@@ -22,6 +22,7 @@ class Session:
         self._state = SessionState()
         self._ids = count(1)
         self._client: Client | None = None
+        self._protocol = ""
         self._task: asyncio.Task | None = None
         self._delay: asyncio.Event | None = None
         self._packets: list[tuple[bool, bytes]] | None = None
@@ -38,7 +39,8 @@ class Session:
     def _entry(self, request_id, operation, target, start, outcome, *,
                function="", error=None, detail="", packets=()):
         entry = JournalEntry(request_id, datetime.now(), operation, target, function,
-                             round((monotonic() - start) * 1000), outcome, error, detail, packets)
+                             round((monotonic() - start) * 1000), outcome, error, detail, packets,
+                             protocol=self._protocol, endpoint=self._state.endpoint)
         self._emit(entry)
         return entry
 
@@ -50,6 +52,7 @@ class Session:
         generation = self._generation
         self._connection_lost = False
         self._task = asyncio.current_task()
+        self._protocol = protocol.key
         self._writable = protocol.writable
         self._update(connection=ConnectionState.CONNECTING, endpoint=endpoint)
         start = monotonic()

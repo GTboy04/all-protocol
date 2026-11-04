@@ -1,8 +1,9 @@
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSignalBlocker, Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
@@ -14,6 +15,7 @@ from ..application.contracts import (
     ClientError, Command, ConnectionState, JournalEntry, Point, ProtocolRegistration,
     ReadUpdate, SessionState, Target, Value,
 )
+from ..storage import ConnectionProfile, LocalHistory, ProfileFields, VISIBLE_LOG_ROWS
 from .io_bridge import IoBridge
 from .widgets import add_field
 
@@ -26,6 +28,12 @@ class ProtocolForm(Protocol):
     def target(self) -> Target: ...
     def can_write(self) -> bool: ...
     def confirm_write(self, parent: QWidget, endpoint: str, target: Target) -> tuple[Value, ...] | None: ...
+
+
+@runtime_checkable
+class ProfileForm(Protocol):
+    def profile_fields(self) -> ProfileFields: ...
+    def restore_profile(self, fields: ProfileFields): ...
 
 
 @dataclass(frozen=True)
@@ -72,8 +80,8 @@ class Rows[T](QAbstractTableModel):
         self.endResetModel()
 
     def prepend(self, item: T):
-        if len(self.items) == 500:
-            self.beginRemoveRows(QModelIndex(), 499, 499)
+        if len(self.items) == VISIBLE_LOG_ROWS:
+            self.beginRemoveRows(QModelIndex(), VISIBLE_LOG_ROWS - 1, VISIBLE_LOG_ROWS - 1)
             self.items.pop()
             self.endRemoveRows()
         self.beginInsertRows(QModelIndex(), 0, 0)
@@ -113,17 +121,20 @@ def _panel():
 
 
 def _journal_row(entry: JournalEntry) -> tuple[str, ...]:
-    return (entry.time.strftime("%H:%M:%S"), entry.operation, entry.target,
+    return (entry.time.strftime("%m-%d %H:%M:%S"), entry.operation, entry.target,
             entry.function or "—", f"{entry.elapsed_ms} ms", entry.outcome)
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, bridge: IoBridge, protocols: tuple[DesktopProtocol, ...]):
+    def __init__(self, bridge: IoBridge, protocols: tuple[DesktopProtocol, ...],
+                 history: LocalHistory | None = None):
         super().__init__()
         self.setWindowTitle("工业协议调试台")
         self.resize(1120, 800)
         self.setMinimumWidth(640)
         self._bridge = bridge
+        self._history = history
+        self._profiles: tuple[ConnectionProfile, ...] = ()
         self._protocols = protocols
         self._forms = tuple(item.create_form() for item in protocols)
         self._state = SessionState()
@@ -133,6 +144,12 @@ class MainWindow(QMainWindow):
         self._last_read: ReadUpdate | None = None
 
         self.protocol = QComboBox()
+        self.recent_connections = QComboBox()
+        self.recent_connections.setAccessibleName("最近连接")
+        self.recent_connections.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.recent_connections.setMinimumContentsLength(17)
+        self.recent_connections.setMaximumWidth(320)
+        self.recent_connections.setToolTip("选择设备后填入连接配置，再点击连接")
         self.connection_forms = QStackedWidget()
         self.query_forms = QStackedWidget()
         for item, form in zip(protocols, self._forms, strict=True):
@@ -186,6 +203,7 @@ class MainWindow(QMainWindow):
         self._build()
 
         self.protocol.currentIndexChanged.connect(self._protocol_changed)
+        self.recent_connections.activated.connect(self._select_profile)
         self.connection_button.clicked.connect(self._toggle_connection)
         self.read_button.clicked.connect(self._read)
         self.write_button.clicked.connect(self._write)
@@ -193,6 +211,7 @@ class MainWindow(QMainWindow):
         self.log_table.selectionModel().currentRowChanged.connect(self._show_detail)
         bridge.event.connect(self._handle_event, Qt.ConnectionType.QueuedConnection)
         bridge.stopped.connect(self._io_stopped, Qt.ConnectionType.QueuedConnection)
+        self._load_history()
         self._refresh()
 
     @property
@@ -231,7 +250,11 @@ class MainWindow(QMainWindow):
         layout.addLayout(body, 1)
 
         connection, connection_layout = _panel()
-        connection_layout.addWidget(_heading("设备连接"))
+        connection_header = QHBoxLayout()
+        connection_header.addWidget(_heading("设备连接"), 1)
+        if self._history is not None:
+            connection_header.addWidget(self.recent_connections)
+        connection_layout.addLayout(connection_header)
         settings = QHBoxLayout()
         settings.setSpacing(10)
         add_field(settings, "协议", self.protocol)
@@ -277,6 +300,65 @@ class MainWindow(QMainWindow):
         body.addWidget(split, 1)
         self.setCentralWidget(root)
 
+    def _history_failure(self, message: str):
+        logging.warning(message, exc_info=True)
+        self.statusBar().showMessage(message, 8000)
+
+    def _load_history(self):
+        if self._history is None:
+            return
+        try:
+            self.journal.reset(self._history.recent_entries())
+        except OSError:
+            self._history_failure("无法读取本地请求日志")
+        try:
+            self._show_profiles(self._history.profiles())
+        except OSError:
+            self._history_failure("无法读取最近连接")
+        if self.recent_connections.count():
+            self._select_profile(0)
+
+    def _show_profiles(self, profiles: tuple[ConnectionProfile, ...]):
+        self._profiles = profiles
+        self.recent_connections.clear()
+        for profile in profiles:
+            index = self.protocol.findData(profile.protocol)
+            if index != -1 and isinstance(self._forms[index], ProfileForm):
+                label = f"{self.protocol.itemText(index)} · {profile.endpoint}"
+                self.recent_connections.addItem(label, profile)
+        self.recent_connections.setPlaceholderText(
+            "最近连接" if self.recent_connections.count() else "暂无连接记录"
+        )
+        self.recent_connections.setCurrentIndex(-1)
+
+    def _select_profile(self, index: int):
+        profile = self.recent_connections.itemData(index)
+        self.recent_connections.setCurrentIndex(-1)
+        protocol_index = self.protocol.findData(profile.protocol)
+        form = self._forms[protocol_index]
+        try:
+            with QSignalBlocker(form.query):
+                form.restore_profile(profile.fields)
+        except (ClientError, KeyError, ValueError):
+            self._history_failure("无法恢复此连接记录，请检查配置")
+            return
+        self.protocol.setCurrentIndex(protocol_index)
+        self.interval.setValue(profile.interval_ms)
+        self._query_changed()
+
+    def _remember_connection(self, endpoint: str):
+        form = self._form
+        if self._history is None or not isinstance(form, ProfileForm):
+            return
+        try:
+            profile = ConnectionProfile(self._registration.key, endpoint, form.profile_fields(), self.interval.value())
+            profiles = self._history.remember(profile)
+        except (ClientError, OSError):
+            self._history_failure("无法保存最近连接")
+            return
+        if profiles != self._profiles:
+            self._show_profiles(profiles)
+
     def _protocol_changed(self, index):
         self.connection_forms.setCurrentIndex(index)
         self.query_forms.setCurrentIndex(index)
@@ -301,6 +383,7 @@ class MainWindow(QMainWindow):
                 return
             self._query_changed()
             self._state = SessionState(ConnectionState.CONNECTING, endpoint)
+            self._remember_connection(endpoint)
             self._bridge.submit(self._bridge.session.connect(self._registration, config, endpoint))
         self._refresh()
 
@@ -316,6 +399,7 @@ class MainWindow(QMainWindow):
 
     def _execute(self, command: Command, interval_ms: int | None = None):
         self.feedback.clear()
+        self._remember_connection(self._state.endpoint)
         self._state = replace(self._state, busy=True, polling=interval_ms is not None)
         self._refresh()
         self._bridge.submit(self._bridge.session.execute(command, interval_ms))
@@ -334,6 +418,13 @@ class MainWindow(QMainWindow):
             if not event.polling:
                 self._stopping_poll = False
         elif isinstance(event, JournalEntry):
+            if self._history is not None:
+                try:
+                    if self._history.append_entry(event):
+                        self.journal.reset()
+                        self.detail.clear()
+                except OSError:
+                    self._history_failure("无法保存本地请求日志")
             self.journal.prepend(event)
             if event.error or event.operation == "写入":
                 self.feedback.setText(f"{event.outcome} · {event.detail}" if event.detail else event.outcome)
@@ -350,7 +441,11 @@ class MainWindow(QMainWindow):
             self.detail.clear()
             return
         entry = self.journal.items[index.row()]
-        lines = [f"#{entry.request_id}  {entry.operation}  {entry.target}  {entry.outcome}"]
+        index = self.protocol.findData(entry.protocol)
+        protocol = self.protocol.itemText(index) if index != -1 else entry.protocol
+        context = (entry.time.strftime("%Y-%m-%d %H:%M:%S"), protocol, entry.endpoint)
+        lines = ["  ".join(filter(None, context)),
+                 f"#{entry.request_id}  {entry.operation}  {entry.target}  {entry.outcome}"]
         if entry.detail:
             lines.append(entry.detail)
         for sending, data in entry.packets:
@@ -375,6 +470,7 @@ class MainWindow(QMainWindow):
         self.connection_button.setText("断开连接" if online else "连接")
         self.connection_button.setEnabled((online or offline) and not self._closing)
         self.protocol.setEnabled(offline and len(self._forms) > 1 and not self._closing)
+        self.recent_connections.setEnabled(offline and not self._closing and self.recent_connections.count() > 0)
         self.connection_forms.setEnabled(offline and not self._closing)
         self.query_forms.setEnabled((offline or idle) and not self._closing)
         self.read_button.setEnabled(idle)

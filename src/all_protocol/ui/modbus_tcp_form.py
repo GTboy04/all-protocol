@@ -7,7 +7,8 @@ from PySide6.QtWidgets import (
 )
 
 from ..adapters.modbus_tcp.model import RULES, Area, ModbusTarget, ModbusTcpConfig
-from ..application.contracts import ClientError, Command, Target, Value
+from ..application.contracts import ClientError, Target, Value
+from ..storage import ProfileFields
 from .widgets import add_field
 
 
@@ -24,13 +25,44 @@ class ModbusTcpForm:
         self.connection = _ConnectionForm()
         self.query = _QueryForm()
 
-    def connection_config(self) -> tuple[object, str]:
+    def connection_config(self) -> tuple[ModbusTcpConfig, str]:
         host = self.connection.host.text().strip()
         if host.startswith("[") and host.endswith("]"):
             host = host[1:-1]
         config = ModbusTcpConfig(host, self.connection.port.value(), self.connection.timeout.value())
         config.validate()
         return config, config.endpoint
+
+    def profile_fields(self) -> ProfileFields:
+        config, _ = self.connection_config()
+        target = self.target()
+        return {
+            "host": config.host,
+            "port": config.port,
+            "timeout_ms": config.timeout_ms,
+            "unit_id": target.unit_id,
+            "area": target.area.value,
+            "offset": target.offset,
+            "count": target.count,
+        }
+
+    def restore_profile(self, fields: ProfileFields):
+        host = fields["host"]
+        port, timeout = fields["port"], fields["timeout_ms"]
+        unit, offset, count = fields["unit_id"], fields["offset"], fields["count"]
+        if not isinstance(host, str) or any(type(value) is not int for value in (port, timeout, unit, offset, count)):
+            raise ValueError("无效的 Modbus TCP 连接记录")
+        config = ModbusTcpConfig(host, port, timeout)
+        target = ModbusTarget(unit, Area(fields["area"]), offset, count)
+        config.validate()
+        target.validate()
+        self.connection.host.setText(config.host)
+        self.connection.port.setValue(config.port)
+        self.connection.timeout.setValue(config.timeout_ms)
+        self.query.unit.setValue(target.unit_id)
+        self.query.area.setCurrentIndex(self.query.area.findData(target.area.value))
+        self.query.offset.setValue(target.offset)
+        self.query.count.setValue(target.count)
 
     def target(self) -> ModbusTarget:
         return self.query.target()

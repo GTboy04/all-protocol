@@ -76,6 +76,8 @@ class JournalEntry:
     error: ErrorKind | None = None
     detail: str = ""
     packets: tuple[tuple[bool, bytes], ...] = ()
+    protocol: str = ""
+    endpoint: str = ""
 
 
 @dataclass(frozen=True, slots=True)
