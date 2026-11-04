@@ -1,0 +1,17 @@
+[project]
+name = "all-protocol"
+version = "0.1.0"
+description = "Desktop industrial protocol workbench"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "PySide6-Essentials>=6.8,<7",
+    "pymodbus>=3.11,<4",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10"]
+release = ["pyinstaller>=6,<7"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
