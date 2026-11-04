@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <title>工业协议调试台</title>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="#18364e"/>
+  <rect x="12" y="12" width="232" height="232" rx="50" fill="none" stroke="#37647c" stroke-width="4"/>
+  <path d="M56 158h38V98h68v60h38" fill="none" stroke="#eaf8ff" stroke-width="18"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="56" cy="158" r="14" fill="#65e2bc"/>
+  <circle cx="200" cy="158" r="14" fill="#65e2bc"/>
+</svg>

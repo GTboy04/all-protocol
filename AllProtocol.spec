@@ -1,6 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 
-a = Analysis(["src/all_protocol/__main__.py"])
+from pathlib import Path
+
+icon = Path(SPECPATH) / "src" / "all_protocol" / "assets" / "app-icon.ico"
+a = Analysis(
+    ["src/all_protocol/__main__.py"],
+    datas=[(str(icon), "all_protocol/assets")],
+)
 
 # Qt on Windows links to the OS ICU ABI. PATH can expose a same-named ICU
 # from another application that exports versioned symbols instead.
@@ -11,5 +17,5 @@ a.binaries = [
 ]
 
 pyz = PYZ(a.pure)
-exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="AllProtocol", console=False)
+exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="AllProtocol", console=False, icon=str(icon))
 coll = COLLECT(exe, a.binaries, a.datas, name="AllProtocol")
