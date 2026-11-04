@@ -1,0 +1,25 @@
+# 工业协议调试台
+
+Windows 桌面客户端。V1 通过 Modbus TCP 访问设备或网关，支持四区读取、HR 和 Coil 写入、定时读取、请求日志及 TX/RX 字节查看。
+
+## 开发启动
+
+在项目目录使用 uv 安装锁定依赖并启动。
+
+```powershell
+uv sync --locked --python 3.12
+uv run --locked python -m all_protocol
+```
+
+填写主机、端口和超时后连接，再按设备文档选择 Unit ID、数据区、起始偏移及数量。起始偏移从 0 开始。读取结果中的数值可用于核对写入。需要查看报文时，选中底部日志中的对应请求。
+
+## 验证与打包
+
+```powershell
+uv run --locked pytest -q
+uv run --locked --group release pyinstaller --noconfirm --onedir --windowed --name AllProtocol --specpath build src/all_protocol/__main__.py
+```
+
+测试会在本机临时端口启动独立 TCP 测试服务。发布时复制或压缩整个 `dist/AllProtocol` 目录，解压后运行其中的 `AllProtocol.exe`。目录内附带 Python 运行时和 Qt 依赖。
+
+新增协议时，实现 `application/contracts.py` 中的会话契约，为协议提供连接配置和目标表单，并在 `__main__.py` 中登记。连接生命周期、轮询与请求日志由通用会话层提供。 [V1 开发文档](docs/v1-development.md)
