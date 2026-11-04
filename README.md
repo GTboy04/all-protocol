@@ -31,3 +31,7 @@ uv run --locked --group release pyinstaller --noconfirm AllProtocol.spec
 测试会在本机临时端口启动独立 TCP 测试服务。发布时复制或压缩整个 `dist/AllProtocol` 目录，解压后运行其中的 `AllProtocol.exe`。目录内附带 Python 运行时和 Qt 依赖。打包配置让 Qt 使用 Windows 自带的 ICU，避免构建机上其他软件的同名 DLL 进入发布包。
 
 新增协议时，实现 `application/contracts.py` 中的会话契约，为协议提供连接配置和目标表单，并在 `__main__.py` 中登记。连接生命周期、轮询与请求日志由通用会话层提供。表单可实现 `profile_fields()` 和 `restore_profile()` 以接入最近连接。 [V1 开发文档](docs/v1-development.md)
+
+## 服务端设计
+
+Modbus TCP 服务端拟用于模拟多从站设备，供现有客户端、PLC 或上位机联调。[服务端设计文档](docs/modbus-tcp-server-design.md) · [角色选择与服务端界面草图](docs/modbus-tcp-server-draft.html)

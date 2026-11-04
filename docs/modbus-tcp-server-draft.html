@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>工业协议调试台 · 服务端界面草图</title>
+  <style>
+    :root { color-scheme: light; --ink: #182f45; --muted: #455f75; --navy: #142a40; --bg: #edf2f6; --paper: #fff; --line: #d4dfe8; --teal: #0f6570; --green: #154c47; }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--ink); background: var(--bg); font: 14px/1.55 "Microsoft YaHei UI", "Microsoft YaHei", sans-serif; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { font-size: 20px; }
+    h2 { font-size: 25px; }
+    h3 { font-size: 15px; }
+    a { color: var(--teal); }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    :focus-visible { outline: 2px solid var(--teal); outline-offset: 3px; }
+    header { background: var(--navy); color: white; border-bottom: 2px solid #367980; }
+    .page { max-width: 1120px; margin-inline: auto; padding-inline: 24px; }
+    .masthead, .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .masthead { min-height: 68px; padding-block: 10px; justify-content: space-between; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand img { width: 34px; height: 34px; }
+    nav { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+    nav a { color: #e6f2fa; text-underline-offset: 4px; }
+    nav a:focus-visible { outline-color: #a9e3e8; }
+    main { padding-block: 24px 40px; display: grid; gap: 24px; }
+    section[id] { scroll-margin-top: 16px; }
+    .panel { background: var(--paper); border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+    .pad { padding: 16px; }
+    .muted { color: var(--muted); }
+    .small { font-size: 12px; }
+    .mono, .value { font: 14px Consolas, "Microsoft YaHei UI", monospace; font-variant-numeric: tabular-nums; }
+    .role-head { margin-bottom: 16px; }
+    .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .role-card { display: grid; justify-items: start; gap: 10px; padding: 18px; border: 1px solid var(--line); border-radius: 6px; }
+    .flow { display: grid; grid-template-columns: minmax(0, 1fr) 40px minmax(0, 1fr); align-items: center; width: 100%; padding: 8px 0; }
+    .node { border: 1px solid var(--line); border-radius: 4px; padding: 6px 4px; background: #f3f7fa; text-align: center; }
+    .node.local { background: #dceff1; border-color: #8db9be; font-weight: 700; }
+    .flow svg { width: 100%; height: 20px; color: var(--teal); }
+    .button, .sample-control { display: inline-flex; align-items: center; justify-content: center; padding: 5px 12px; min-height: 34px; background: white; color: var(--ink); border: 1px solid #b9cad8; border-radius: 4px; text-decoration: none; }
+    .button:hover:not(:disabled) { border-color: var(--teal); }
+    .primary, .sample-control.primary { color: white; background: var(--teal); border-color: var(--teal); }
+    .sample-control { color: var(--muted); }
+    .button:disabled, .sample-control[aria-disabled="true"] { color: #556b7d; background: #f0f4f7; border-color: var(--line); cursor: default; }
+    .window-bar { background: var(--navy); color: white; padding: 12px 16px; border-bottom: 2px solid #367980; }
+    .window-bar h2 { font-size: 19px; }
+    .window-bar a { color: #e6f2fa; }
+    .window-bar a:focus-visible { outline-color: #a9e3e8; }
+    .state { margin-left: auto; color: #eef5fb; background: #263e54; border: 1px solid #587387; border-radius: 4px; padding: 3px 9px; }
+    .state.running { color: #b8f6e2; background: var(--green); border-color: #398775; }
+    .listener { display: flex; align-items: end; flex-wrap: wrap; gap: 8px 12px; background: #f8fafc; border-bottom: 1px solid var(--line); }
+    label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
+    input { color: var(--ink); background: white; border: 1px solid #b9cad8; border-radius: 4px; min-width: 0; padding: 6px 8px; min-height: 34px; }
+    input:disabled { color: #455f75; background: #eef2f6; }
+    input[type="checkbox"] { min-height: auto; width: 18px; height: 18px; margin: 4px 0; }
+    .short { width: 90px; }
+    .hint { margin-left: auto; align-self: center; }
+    .workspace { display: grid; grid-template-columns: 198px minmax(0, 1fr); }
+    aside { padding: 12px; background: #f8fafc; border-right: 1px solid var(--line); }
+    .station-list { display: grid; gap: 5px; margin-top: 12px; }
+    .station { text-align: left; padding: 7px; color: var(--ink); border: 1px solid transparent; border-radius: 4px; background: transparent; }
+    .station[aria-pressed="true"] { background: #d2e9ed; border-color: #9fc6cb; }
+    .tabs { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 16px; border-bottom: 1px solid var(--line); }
+    .tabs button { color: var(--muted); padding: 7px 10px; border: 0; border-bottom: 3px solid transparent; background: transparent; }
+    .tabs button[aria-pressed="true"] { color: var(--teal); border-bottom-color: var(--teal); font-weight: 700; }
+    .toolbar { padding: 9px 16px; }
+    .push { margin-left: auto; }
+    .table-scroll { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; white-space: nowrap; }
+    th, td { padding: 7px 12px; text-align: left; border-bottom: 1px solid #e4ecf2; }
+    th { background: #eaf1f6; color: #3b536a; font-size: 12px; }
+    tbody tr:nth-child(even) { background: #f8fafc; }
+    .number { text-align: right; }
+    .log { border-top: 1px solid var(--line); }
+    .selected { background: #e3f1f3; }
+    .packet { margin: 10px 16px 16px; padding: 10px 12px; background: var(--ink); color: #e6f2fa; border-radius: 4px; overflow-x: auto; white-space: pre; }
+    .form-demo { max-width: 480px; margin-top: 12px; }
+    .form-fields { display: grid; gap: 10px; }
+    .form-foot { justify-content: flex-end; margin-top: 12px; }
+    @media (max-width: 650px) {
+      .page { padding-inline: 12px; }
+      .cards, .workspace { grid-template-columns: 1fr; }
+      aside { border-right: 0; border-bottom: 1px solid var(--line); }
+      .station-list { display: flex; flex-wrap: wrap; }
+      .hint, .push { margin-left: 0; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="page masthead">
+      <div class="brand">
+        <img src="../src/all_protocol/assets/app-icon.svg" alt="">
+        <h1>工业协议调试台 · 界面草图</h1>
+      </div>
+      <nav aria-label="草图导航">
+        <a href="#role">角色选择</a><a href="#workbench">服务端工作台</a><a href="#point">新增点位</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="panel pad" id="role" aria-labelledby="role-heading">
+      <div class="role-head">
+        <h2 id="role-heading">选择调试模式</h2>
+        <p class="muted">根据本机在这次调试中的角色进入工作台。</p>
+      </div>
+      <div class="cards">
+        <div class="role-card">
+          <h3>客户端</h3>
+          <div class="flow" aria-label="请求从本机发往目标设备">
+            <span class="node local">本机</span>
+            <svg viewBox="0 0 40 20" aria-hidden="true"><path d="M4 10h31m-6-5 6 5-6 5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+            <span class="node">目标设备</span>
+          </div>
+          <p>连接设备，读取或写入点位。</p>
+          <a class="button" href="v1-client-draft.html">进入客户端</a>
+        </div>
+        <div class="role-card">
+          <h3>服务端</h3>
+          <div class="flow" aria-label="请求从外部客户端发往本机">
+            <span class="node local">本机</span>
+            <svg viewBox="0 0 40 20" aria-hidden="true"><path d="M36 10H5m6-5-6 5 6 5" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>
+            <span class="node">外部客户端</span>
+          </div>
+          <p>配置虚拟从站，响应外部读写请求。</p>
+          <a class="button primary" href="#workbench">进入服务端</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="workbench" aria-labelledby="server-heading">
+      <div class="window-bar row">
+        <a href="#role">‹ 返回首页</a>
+        <h2 id="server-heading">Modbus TCP 服务端</h2>
+        <span class="state" id="state" role="status">● 已停止</span>
+      </div>
+      <div class="listener pad">
+        <label>监听地址 <input class="mono" id="host" value="127.0.0.1"></label>
+        <label>端口 <input class="mono short" id="port" type="number" min="1" max="65535" value="1502"></label>
+        <button class="button primary" id="listen" type="button">启动服务</button>
+        <p class="hint small muted">交互草图，监听与日志均为示例</p>
+      </div>
+      <div class="workspace">
+        <aside aria-label="从站列表">
+          <div class="row"><h3>从站</h3><span class="sample-control small" data-structure>＋ 添加从站</span></div>
+          <div class="station-list" id="stations">
+            <button class="station" type="button" data-station="1" aria-pressed="true">站 1　模拟仪表</button>
+            <button class="station" type="button" data-station="2" aria-pressed="false">站 2　模拟远程 I/O</button>
+          </div>
+        </aside>
+        <div>
+          <div class="pad row"><h3 id="station-heading">站 1 / 模拟仪表</h3><span class="push small muted">0 基偏移</span></div>
+          <div class="tabs" id="areas" role="group" aria-label="数据区">
+            <button type="button" data-area="HR" aria-pressed="true">保持 HR</button>
+            <button type="button" data-area="IR" aria-pressed="false">输入 IR</button>
+            <button type="button" data-area="Coil" aria-pressed="false">线圈 Coil</button>
+            <button type="button" data-area="DI" aria-pressed="false">离散 DI</button>
+          </div>
+          <div class="toolbar row">
+            <button class="button" id="add-point" type="button">＋ 添加点位</button>
+            <span class="sample-control" data-structure>批量添加</span>
+            <span class="push small muted">方案已保存</span>
+            <span class="sample-control">保存方案</span>
+          </div>
+          <div class="table-scroll">
+            <table aria-label="点位表">
+              <thead><tr><th scope="col">偏移</th><th scope="col">名称</th><th scope="col">类型</th><th scope="col" class="number">初始值</th><th scope="col" class="number">当前值</th></tr></thead>
+              <tbody id="points">
+                <tr><td class="mono">0</td><td>设定转速</td><td class="mono">UInt16</td><td class="value number">1200</td><td class="value number">—</td></tr>
+                <tr><td class="mono">1</td><td>运行模式</td><td class="mono">UInt16</td><td class="value number">0</td><td class="value number">—</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="log">
+        <div class="pad row"><h3>请求日志</h3><span class="small muted">上次会话 · 示例记录</span></div>
+        <div class="table-scroll">
+          <table aria-label="服务端请求日志示例">
+            <thead><tr><th scope="col">时间</th><th scope="col">来源客户端</th><th scope="col">Unit ID</th><th scope="col">功能码</th><th scope="col">起始偏移</th><th scope="col">数量</th><th scope="col">结果</th></tr></thead>
+            <tbody><tr class="selected"><td class="mono">14:32:06</td><td class="mono">127.0.0.1:53421</td><td class="mono">1</td><td class="mono">03</td><td class="mono">0</td><td class="mono">1</td><td>读取成功</td></tr></tbody>
+          </table>
+        </div>
+        <pre class="packet mono" aria-label="原始报文示例">RX  00 01 00 00 00 06 01 03 00 00 00 01
+TX  00 01 00 00 00 05 01 03 02 04 B0</pre>
+      </div>
+    </section>
+
+    <section id="point" aria-labelledby="point-heading">
+      <h2 id="point-heading" tabindex="-1">新增点位表单</h2>
+      <p class="muted">桌面端以对话框呈现。值的输入方式随数据区变化。</p>
+      <div class="panel pad form-demo">
+        <div class="row"><h3>新增点位</h3><span class="small muted" id="form-context">站 1 / 保持寄存器 HR</span></div>
+        <div class="form-fields">
+          <label>0 基偏移 <input id="offset" class="mono" type="number" min="0" max="65535" value="2"></label>
+          <label>名称（可选） <input id="point-name" value="目标频率"></label>
+          <label>初始值 <input id="initial" class="mono" type="number" min="0" max="65535" value="50"></label>
+          <p class="small muted" id="type-hint">UInt16，范围 0–65535，占用 1 个寄存器。</p>
+        </div>
+        <div class="row form-foot"><a class="button" href="#workbench">返回工作台</a><span class="sample-control primary">添加点位</span></div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const byId = (id) => document.getElementById(id);
+    const samples = {
+      1: { name: "模拟仪表", HR: [[0, "设定转速", 1200], [1, "运行模式", 0]], IR: [[0, "当前转速", 1185]], Coil: [[0, "运行指令", true]], DI: [[0, "运行反馈", true]] },
+      2: { name: "模拟远程 I/O", HR: [[0, "设定转速", 900]], IR: [[0, "当前转速", 885]], Coil: [[0, "输出指令", false]], DI: [[0, "限位开关", false]] },
+    };
+    const areaLabels = { HR: "保持寄存器 HR", IR: "输入寄存器 IR", Coil: "线圈 Coil", DI: "离散输入 DI" };
+    let station = 1;
+    let area = "HR";
+    let running = false;
+
+    function render() {
+      const device = samples[station];
+      const bit = area === "Coil" || area === "DI";
+      byId("station-heading").textContent = `站 ${station} / ${device.name}`;
+      byId("points").replaceChildren(...device[area].map(([offset, name, initial]) => {
+        const row = document.createElement("tr");
+        const value = bit ? (initial ? "开" : "关") : initial;
+        [offset, name, bit ? "Bool" : "UInt16", value, running ? value : "—"].forEach((text, index) => {
+          const cell = row.insertCell();
+          cell.textContent = text;
+          cell.className = ["mono", "", "mono", "value number", "value number"][index];
+        });
+        return row;
+      }));
+      for (const button of document.querySelectorAll("[data-station]")) {
+        button.setAttribute("aria-pressed", Number(button.dataset.station) === station);
+      }
+      for (const button of document.querySelectorAll("[data-area]")) {
+        button.setAttribute("aria-pressed", button.dataset.area === area);
+      }
+      byId("state").textContent = running ? "● 监听中" : "● 已停止";
+      byId("state").classList.toggle("running", running);
+      byId("listen").textContent = running ? "停止服务" : "启动服务";
+      for (const id of ["host", "port", "add-point"]) byId(id).disabled = running;
+      for (const control of document.querySelectorAll("[data-structure]")) {
+        control.setAttribute("aria-disabled", running);
+      }
+    }
+
+    function renderForm() {
+      const bit = area === "Coil" || area === "DI";
+      byId("form-context").textContent = `站 ${station} / ${areaLabels[area]}`;
+      byId("offset").value = samples[station][area].at(-1)[0] + 1;
+      byId("point-name").value = "";
+      const field = byId("initial");
+      field.type = bit ? "checkbox" : "number";
+      field.checked = false;
+      field.value = bit ? "1" : "0";
+      byId("type-hint").textContent = bit ? "Bool，选中为开，占用 1 位。" : "UInt16，范围 0–65535，占用 1 个寄存器。";
+      location.hash = "point";
+      byId("point-heading").focus();
+    }
+
+    byId("stations").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-station]");
+      if (button) { station = Number(button.dataset.station); render(); }
+    });
+    byId("areas").addEventListener("click", (event) => {
+      const button = event.target.closest("[data-area]");
+      if (button) { area = button.dataset.area; render(); }
+    });
+    byId("listen").addEventListener("click", () => {
+      if (!running && !byId("port").reportValidity()) return;
+      running = !running;
+      render();
+    });
+    byId("add-point").addEventListener("click", renderForm);
+  </script>
+</body>
+</html>
