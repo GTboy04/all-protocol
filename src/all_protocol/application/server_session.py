@@ -6,6 +6,7 @@ from enum import StrEnum
 from ..adapters.modbus_tcp.model import Area
 from ..adapters.modbus_tcp.server import ServerRequest, TcpServer
 from ..adapters.modbus_tcp.server_model import ServerPlan
+from .contracts import Value
 
 
 class ListenerState(StrEnum):
@@ -58,7 +59,7 @@ class ServerSession:
             self._record("已停止监听")
             self.emit(ListenerUpdate(ListenerState.STOPPED))
 
-    async def set_current(self, unit: int, area: Area, offset: int, value: int):
+    async def set_current(self, unit: int, area: Area, offset: int, value: Value):
         if self.server is not None:
             try:
                 self.server.set_current(unit, area, offset, value)

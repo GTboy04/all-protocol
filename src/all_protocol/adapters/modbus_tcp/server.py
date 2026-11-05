@@ -11,8 +11,9 @@ from pymodbus.server import ModbusTcpServer
 from pymodbus.server.base import ModbusBaseServer
 from pymodbus.server.requesthandler import ServerRequestHandler
 
+from ...application.contracts import Value
 from .model import RULES, Area
-from .server_model import ServerPlan, validate_value
+from .server_model import ServerPlan
 
 
 READ_AREAS = {rule.read_code: area for area, rule in RULES.items()}
@@ -48,8 +49,16 @@ class RuntimeValues:
 
     def __init__(self, plan: ServerPlan, changed: Callable[[ValuesChanged], None]):
         self.stations = {
-            station.unit_id: {(point.area, point.offset): point.initial for point in station.points}
+            station.unit_id: {
+                (point.area, address): word
+                for point in station.points
+                for address, word in zip(point.addresses, point.encode(point.initial), strict=True)
+            }
             for station in plan.stations
+        }
+        self.points = {
+            (station.unit_id, point.area, point.offset): point
+            for station in plan.stations for point in station.points
         }
         self.changed = changed
 
@@ -186,7 +195,8 @@ class TcpServer(ModbusTcpServer):
             logging.exception("Modbus TCP request failed")
             return ExceptionResponse(code, ExcCodes.DEVICE_FAILURE)
 
-    def set_current(self, unit: int, area: Area, offset: int, value: int):
-        validate_value(area, value)
-        if self.context.set_values(unit, area, offset, (value,)) is not None:
+    def set_current(self, unit: int, area: Area, offset: int, value: Value):
+        point = self.context.points.get((unit, area, offset))
+        if point is None:
             raise ValueError("点位不存在")
+        self.context.set_values(unit, area, offset, point.encode(value))

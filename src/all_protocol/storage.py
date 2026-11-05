@@ -11,6 +11,7 @@ from PySide6.QtCore import QIODevice, QLockFile, QSaveFile
 from .adapters.modbus_tcp.model import Area
 from .adapters.modbus_tcp.server import ServerRequest
 from .adapters.modbus_tcp.server_model import ServerPlan, ServerPoint, Station
+from .adapters.modbus_tcp.values import DataType, RegisterOrder
 from .application.contracts import ErrorKind, JournalEntry
 
 
@@ -203,7 +204,7 @@ class ServerStorage:
         except FileNotFoundError:
             return ServerPlan()
         if (not isinstance(data, dict) or type(data.get("schema_version")) is not int
-                or data["schema_version"] != 1 or data.get("protocol") != "modbus-tcp"):
+                or data["schema_version"] not in (1, 2) or data.get("protocol") != "modbus-tcp"):
             raise ValueError("方案版本或协议无法识别")
         if not isinstance(data["stations"], list):
             raise ValueError("从站必须是列表")
@@ -212,7 +213,11 @@ class ServerStorage:
                 raise ValueError("从站点位必须是列表")
         stations = tuple(
             Station(station["unit_id"], station["name"], tuple(
-                ServerPoint(Area(point["area"]), point["offset"], point["initial"], point["name"])
+                ServerPoint(
+                    Area(point["area"]), point["offset"], point["initial"], point["name"],
+                    DataType(point["data_type"]) if point.get("data_type") is not None else None,
+                    RegisterOrder(point.get("order", RegisterOrder.BIG)),
+                )
                 for point in station["points"]
             ))
             for station in data["stations"]
@@ -223,7 +228,7 @@ class ServerStorage:
 
     def save_plan(self, plan: ServerPlan):
         plan.validate()
-        record = {"schema_version": 1, "protocol": "modbus-tcp", **asdict(plan)}
+        record = {"schema_version": 2, "protocol": "modbus-tcp", **asdict(plan)}
         with _locked(self.directory, "server-plan.lock"):
             _replace_file(self.plan_path, _json_bytes(record))
 

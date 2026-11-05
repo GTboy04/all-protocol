@@ -1,26 +1,45 @@
 from dataclasses import dataclass, replace
 
-from .model import RULES, Area
-
-
-def validate_value(area: Area, value: int):
-    if type(value) not in (int, bool) or not 0 <= value <= RULES[area].value_limit:
-        raise ValueError(f"{area} 的值必须在 0–{RULES[area].value_limit} 之间")
+from ...application.contracts import Value
+from .model import Area, data_types
+from .values import DataType, RegisterOrder
 
 
 @dataclass(frozen=True, slots=True)
 class ServerPoint:
     area: Area
     offset: int
-    initial: int
+    initial: Value
     name: str = ""
+    data_type: DataType | None = None
+    order: RegisterOrder = RegisterOrder.BIG
+
+    @property
+    def value_type(self) -> DataType:
+        return self.data_type if self.data_type is not None else data_types(self.area)[0]
+
+    @property
+    def addresses(self) -> range:
+        return range(self.offset, self.offset + self.value_type.words)
+
+    def encode(self, value: Value) -> tuple[int, ...]:
+        return self.value_type.encode(value, self.order)
+
+    def decode(self, words: tuple[int, ...]) -> Value:
+        return self.value_type.decode(words, self.order)
 
     def validate(self):
         if type(self.offset) is not int or not 0 <= self.offset <= 65535:
             raise ValueError(f"偏移 {self.offset} 超出 0–65535")
         if not isinstance(self.name, str):
             raise ValueError("点位名称必须是文本")
-        validate_value(self.area, self.initial)
+        if not isinstance(self.value_type, DataType) or self.value_type not in data_types(self.area):
+            raise ValueError(f"{self.area} 数据区不支持此类型")
+        if not isinstance(self.order, RegisterOrder):
+            raise ValueError("无效的寄存器顺序")
+        if self.addresses[-1] > 65535:
+            raise ValueError(f"偏移 {self.addresses[-1]} 超出 0–65535")
+        self.encode(self.initial)
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,22 +56,27 @@ class Station:
         seen = set()
         for point in self.points:
             point.validate()
-            key = point.area, point.offset
-            if key in seen:
-                raise ValueError(f"站 {self.unit_id} 的 {point.area} / {point.offset} 已存在")
-            seen.add(key)
+            for address in point.addresses:
+                key = point.area, address
+                if key in seen:
+                    raise ValueError(f"站 {self.unit_id} 的 {point.area} / {address} 已存在")
+                seen.add(key)
 
-    def add_points(self, area: Area, offset: int, count: int, initial: int, name: str = ""):
+    def add_points(self, area: Area, offset: int, count: int, initial: Value, name: str = "",
+                   data_type: DataType | None = None, order: RegisterOrder = RegisterOrder.BIG):
         if type(count) is not int or count < 1:
             raise ValueError("数量必须大于 0")
-        validate_value(area, initial)
-        occupied = {point.offset for point in self.points if point.area == area}
-        for address in range(offset, offset + count):
-            if not 0 <= address <= 65535:
-                raise ValueError(f"偏移 {address} 超出 0–65535")
+        first = ServerPoint(area, offset, initial, name, data_type, order)
+        first.validate()
+        words = first.value_type.words
+        end = offset + count * words
+        if end > 65536:
+            raise ValueError(f"偏移 {end - 1} 超出 0–65535")
+        occupied = {address for point in self.points if point.area == area for address in point.addresses}
+        for address in range(offset, end):
             if address in occupied:
                 raise ValueError(f"站 {self.unit_id} 的 {area} / {address} 已存在")
-        points = tuple(ServerPoint(area, address, initial, name) for address in range(offset, offset + count))
+        points = tuple(replace(first, offset=address) for address in range(offset, end, words))
         return replace(self, points=self.points + points)
 
 

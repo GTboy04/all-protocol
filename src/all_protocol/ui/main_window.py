@@ -134,13 +134,12 @@ class MainWindow(QMainWindow):
     def __init__(self, bridge: IoBridge, protocols: tuple[DesktopProtocol, ...],
                  history: LocalHistory | None = None, return_home: Callable[[], None] | None = None):
         super().__init__()
-        self.setWindowTitle("工业协议调试台")
+        self.setWindowTitle("工业协议调试台 · 客户端")
         self.resize(1120, 800)
         self.setMinimumWidth(640)
         self._bridge = bridge
         self._history = history
         self._return_home = return_home
-        self._going_home = False
         self._profiles: tuple[ConnectionProfile, ...] = ()
         self._protocols = protocols
         self._forms = tuple(item.create_form() for item in protocols)
@@ -245,7 +244,7 @@ class MainWindow(QMainWindow):
         header.setSpacing(10)
         if self._return_home is not None:
             home = QPushButton("返回首页")
-            home.clicked.connect(self._go_home)
+            home.clicked.connect(self._return_home)
             header.addWidget(home)
         icon = self.windowIcon()
         if not icon.isNull():
@@ -535,14 +534,8 @@ class MainWindow(QMainWindow):
                 text += " · 旧数据"
         self.result_context.setText(text)
 
-    def _go_home(self):
-        self._going_home = True
-        self.close()
-
     def _io_stopped(self):
         self._stopped = True
-        if self._going_home:
-            self._return_home()
         self.close()
 
     def closeEvent(self, event: QCloseEvent):

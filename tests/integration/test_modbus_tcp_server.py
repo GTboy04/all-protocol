@@ -1,4 +1,5 @@
 import asyncio
+import json
 import socket
 import struct
 from dataclasses import replace
@@ -10,7 +11,8 @@ from all_protocol.adapters.modbus_tcp.client import ModbusTcpClient
 from all_protocol.adapters.modbus_tcp.model import Area, ModbusTarget, ModbusTcpConfig
 from all_protocol.adapters.modbus_tcp.server import ServerRequest, ValuesChanged
 from all_protocol.adapters.modbus_tcp.server_model import ServerPlan, ServerPoint, Station
-from all_protocol.application.contracts import ClientEvents
+from all_protocol.adapters.modbus_tcp.values import DataType, RegisterOrder
+from all_protocol.application.contracts import ClientEvents, ProtocolRegistration
 from all_protocol.application.server_session import ListenerState, ListenerUpdate, ServerSession
 from all_protocol.storage import ServerStorage
 
@@ -149,12 +151,40 @@ def test_server_plan_validation_and_storage(tmp_path, monkeypatch):
     assert storage.load_plan() == plan
 
 
-def test_role_window_server_can_start_and_return_home(tmp_path, monkeypatch):
+def test_typed_points_batch_overlap_and_legacy_plan(tmp_path):
+    storage = ServerStorage(tmp_path)
+    storage.plan_path.write_text(json.dumps({
+        "schema_version": 1, "protocol": "modbus-tcp", "host": "127.0.0.1", "port": 1502,
+        "stations": [{"unit_id": 1, "name": "", "points": [
+            {"area": "HR", "offset": 0, "initial": 65535, "name": ""},
+        ]}],
+    }), encoding="utf-8")
+    plan = storage.load_plan()
+    station = plan.stations[0]
+    assert station.points[0].value_type == DataType.UINT16
+    station = station.add_points(Area.HR, 1, 2, 2**64 - 1, data_type=DataType.UINT64)
+    assert [point.offset for point in station.points] == [0, 1, 5]
+    with pytest.raises(ValueError, match="HR / 4"):
+        station.add_points(Area.HR, 4, 1, 0)
+    with pytest.raises(ValueError, match="65536"):
+        station.add_points(Area.IR, 65535, 1, 1, data_type=DataType.INT32)
+    with pytest.raises(ValueError, match="范围"):
+        station.add_points(Area.HR, 9, 1, 2**64, data_type=DataType.UINT64)
+    with pytest.raises(ValueError, match="不支持"):
+        station.add_points(Area.COIL, 0, 1, 0, data_type=DataType.FLOAT32)
+    plan = replace(plan, stations=(station,))
+    storage.save_plan(plan)
+    assert storage.load_plan() == plan
+
+
+def test_role_window_runs_client_and_server_together(tmp_path, monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtCore import QTimer
-    from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton
+    from PySide6.QtWidgets import QApplication, QDialogButtonBox, QFormLayout, QMessageBox, QPlainTextEdit, QPushButton
     from test_desktop import wait_for
 
+    from all_protocol.ui.main_window import DesktopProtocol
+    from all_protocol.ui.modbus_tcp_form import ModbusTcpForm
     from all_protocol.ui.role_window import RoleWindow
 
     app = QApplication.instance() or QApplication([])
@@ -163,14 +193,38 @@ def test_role_window_server_can_start_and_return_home(tmp_path, monkeypatch):
         port = sock.getsockname()[1]
     station = Station(1).add_points(Area.HR, 0, 1, 1200)
     ServerStorage(tmp_path).save_plan(ServerPlan(port=port, stations=(station,)))
-    role = RoleWindow((), tmp_path)
+    protocol = DesktopProtocol(
+        ProtocolRegistration("modbus-tcp", "Modbus TCP", ModbusTcpClient, True), ModbusTcpForm)
+    role = RoleWindow((protocol,), tmp_path)
     try:
         role.show()
-        next(button for button in role.findChildren(QPushButton) if button.text() == "进入服务端").click()
-        window = role._workbench
-        assert not role.isVisible()
+        def button(parent, label):
+            return next(item for item in parent.findChildren(QPushButton) if item.text() == label)
+
+        button(role, "进入服务端").click()
+        window, _ = role._workbenches["server"]
+        assert role.isVisible()
         assert window.status.text() == "已停止"
         assert window.points.index(0, 4).data() == "—"
+
+        def add_float():
+            dialog = app.activeModalWidget()
+            form = dialog.findChild(QFormLayout)
+            fields = {
+                form.itemAt(row, QFormLayout.ItemRole.LabelRole).widget().text():
+                form.itemAt(row, QFormLayout.ItemRole.FieldRole).widget()
+                for row in range(form.rowCount())
+            }
+            fields["偏移（0 基）"].setValue(1)
+            fields["数据类型"].setCurrentText(DataType.FLOAT32.value)
+            fields["寄存器顺序"].setCurrentText(RegisterOrder.SWAP_WORDS.label)
+            fields["初始值"].setText("1.5")
+            dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Ok).click()
+
+        QTimer.singleShot(0, add_float)
+        window.add_point.click()
+        assert window.points.index(1, 2).data() == "Float32"
+        window.save.click()
         window.listen.click()
         wait_for(lambda: window.status.text() == "监听中")
         assert not window.add_point.isEnabled()
@@ -183,24 +237,61 @@ def test_role_window_server_can_start_and_return_home(tmp_path, monkeypatch):
             with sock.makefile("rb") as stream:
                 assert stream.read(len(frame)) == frame
         wait_for(lambda: window.points.index(0, 4).data() == "1300")
+        assert window.points.index(1, 0).data() == "1–2"
+
+        button(window, "返回首页").click()
+        assert window.status.text() == "监听中"
+        button(role, "进入客户端").click()
+        client, _ = role._workbenches["client"]
+        button(role, "进入服务端").click()
+        assert role._workbenches["server"][0] is window
+        form = client._form
+        form.connection.host.setText("127.0.0.1")
+        form.connection.port.setValue(port)
+        form.query.offset.setValue(1)
+        form.query.count.setValue(1)
+        form.query.data_type.setCurrentIndex(form.query.data_type.findData(DataType.FLOAT32.value))
+        form.query.order.setCurrentIndex(form.query.order.findData(RegisterOrder.SWAP_WORDS.value))
+        client.connection_button.click()
+        wait_for(client.read_button.isEnabled)
+        client.read_button.click()
+        wait_for(lambda: client.results.rowCount() == 1 and client.read_button.isEnabled())
+        assert client.results.items[0].value == 1.5
+        assert client.results.items[0].hex_value == "0x00003FC0"
+
+        def confirm_write():
+            dialog = app.activeModalWidget()
+            dialog.findChild(QPlainTextEdit).setPlainText("-2.5")
+            dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Ok).click()
+
+        QTimer.singleShot(0, confirm_write)
+        client.write_button.click()
+        wait_for(lambda: window.points.index(1, 4).data() == "-2.5")
+        frame = bytes.fromhex("0002 0000 0006 01 06 0002 4040")
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
+            sock.sendall(frame)
+            with sock.makefile("rb") as stream:
+                assert stream.read(len(frame)) == frame
+        wait_for(lambda: window.points.index(1, 4).data() == "3.0")
+        client.close()
+        wait_for(lambda: "client" not in role._workbenches)
+        assert window.status.text() == "监听中"
         assert window.dirty.text() == "已保存"
         window.listen.click()
         wait_for(lambda: window.status.text() == "已停止")
         assert window.points.index(0, 4).data() == "—"
         window.host.setText("0.0.0.0")
-        home = next(button for button in window.findChildren(QPushButton) if button.text() == "返回首页")
-
         def choose(label):
             prompt = app.activeModalWidget()
             assert isinstance(prompt, QMessageBox)
             next(button for button in prompt.buttons() if button.text() == label).click()
 
         QTimer.singleShot(0, lambda: choose("取消"))
-        home.click()
+        window.close()
         assert window.isVisible()
         QTimer.singleShot(0, lambda: choose("放弃修改"))
-        home.click()
-        wait_for(role.isVisible)
+        window.close()
+        wait_for(lambda: "server" not in role._workbenches)
         assert ServerStorage(tmp_path).load_plan().host == "127.0.0.1"
     finally:
         role.join()

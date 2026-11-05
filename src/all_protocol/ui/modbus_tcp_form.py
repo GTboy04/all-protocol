@@ -1,12 +1,13 @@
 import re
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QSignalBlocker, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel,
     QLineEdit, QPlainTextEdit, QSpinBox, QVBoxLayout, QWidget,
 )
 
-from ..adapters.modbus_tcp.model import RULES, Area, ModbusTarget, ModbusTcpConfig
+from ..adapters.modbus_tcp.model import RULES, Area, ModbusTarget, ModbusTcpConfig, data_types
+from ..adapters.modbus_tcp.values import DataType, RegisterOrder
 from ..application.contracts import ClientError, Target, Value
 from ..storage import ProfileFields
 from .widgets import add_field
@@ -17,6 +18,14 @@ def spinbox(minimum, maximum, value):
     box.setRange(minimum, maximum)
     box.setValue(value)
     box.setKeyboardTracking(False)
+    return box
+
+
+def order_picker(selected=RegisterOrder.BIG):
+    box = QComboBox()
+    for order in RegisterOrder:
+        box.addItem(order.label, order.value)
+    box.setCurrentIndex(box.findData(selected.value))
     return box
 
 
@@ -44,6 +53,8 @@ class ModbusTcpForm:
             "area": target.area.value,
             "offset": target.offset,
             "count": target.count,
+            "data_type": target.value_type.value,
+            "order": target.order.value,
         }
 
     def restore_profile(self, fields: ProfileFields):
@@ -53,7 +64,10 @@ class ModbusTcpForm:
         if not isinstance(host, str) or any(type(value) is not int for value in (port, timeout, unit, offset, count)):
             raise ValueError("无效的 Modbus TCP 连接记录")
         config = ModbusTcpConfig(host, port, timeout)
-        target = ModbusTarget(unit, Area(fields["area"]), offset, count)
+        area = Area(fields["area"])
+        data_type = DataType(fields.get("data_type", data_types(area)[0]))
+        order = RegisterOrder(fields.get("order", RegisterOrder.BIG))
+        target = ModbusTarget(unit, area, offset, count, data_type, order)
         config.validate()
         target.validate()
         self.connection.host.setText(config.host)
@@ -61,6 +75,8 @@ class ModbusTcpForm:
         self.connection.timeout.setValue(config.timeout_ms)
         self.query.unit.setValue(target.unit_id)
         self.query.area.setCurrentIndex(self.query.area.findData(target.area.value))
+        self.query.data_type.setCurrentIndex(self.query.data_type.findData(data_type.value))
+        self.query.order.setCurrentIndex(self.query.order.findData(order.value))
         self.query.offset.setValue(target.offset)
         self.query.count.setValue(target.count)
 
@@ -69,7 +85,7 @@ class ModbusTcpForm:
 
     def can_write(self) -> bool:
         target = self.target()
-        return 1 <= target.count <= RULES[target.area].write_limit
+        return 1 <= target.register_count <= RULES[target.area].write_limit
 
     def confirm_write(self, parent: QWidget, endpoint: str, target: Target) -> tuple[Value, ...] | None:
         dialog = _WriteDialog(parent, endpoint, target)
@@ -103,6 +119,8 @@ class _QueryForm(QWidget):
             self.area.addItem(f"{area} {rule.label}", area.value)
         self.offset = spinbox(0, 65535, 0)
         self.count = spinbox(1, 125, 4)
+        self.data_type = QComboBox()
+        self.order = order_picker()
         self.permissions = QLabel()
         self.permissions.setObjectName("permissions")
         self.permissions.setWordWrap(True)
@@ -111,34 +129,59 @@ class _QueryForm(QWidget):
         add_field(fields, "Unit ID", self.unit)
         add_field(fields, "数据区", self.area, 1)
         add_field(fields, "起始偏移", self.offset)
-        add_field(fields, "数量", self.count)
+        add_field(fields, "点位数量", self.count)
+        formats = QHBoxLayout()
+        formats.setSpacing(10)
+        add_field(formats, "数据类型", self.data_type)
+        add_field(formats, "寄存器顺序", self.order)
+        formats.addStretch()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         layout.addLayout(fields)
+        layout.addLayout(formats)
         layout.addWidget(self.permissions)
-        self.area.currentIndexChanged.connect(self._changed)
+        self.area.currentIndexChanged.connect(self._area_changed)
+        self.data_type.currentIndexChanged.connect(self._changed)
+        self.order.currentIndexChanged.connect(self._changed)
         for box in (self.unit, self.offset, self.count):
             box.valueChanged.connect(self._changed)
-        self._changed()
+        self._area_changed()
 
     def target(self) -> ModbusTarget:
-        return ModbusTarget(self.unit.value(), Area(self.area.currentData()),
-                            self.offset.value(), self.count.value())
+        area = Area(self.area.currentData())
+        data_type = DataType(self.data_type.currentData())
+        order = RegisterOrder(self.order.currentData()) if data_type != DataType.BOOL else RegisterOrder.BIG
+        return ModbusTarget(self.unit.value(), area, self.offset.value(), self.count.value(),
+                            None if data_type == data_types(area)[0] else data_type, order)
+
+    def _area_changed(self):
+        supported = data_types(Area(self.area.currentData()))
+        previous = self.data_type.currentData()
+        with QSignalBlocker(self.data_type):
+            self.data_type.clear()
+            for data_type in supported:
+                self.data_type.addItem(data_type.value, data_type.value)
+            self.data_type.setCurrentIndex(max(0, self.data_type.findData(previous)))
+        self._changed()
 
     def _changed(self):
-        rule = RULES[Area(self.area.currentData())]
-        previous = self.count.blockSignals(True)
-        self.count.setMaximum(min(rule.read_limit, 65536 - self.offset.value()))
-        self.count.blockSignals(previous)
-        operations = f"只读 · 读取 0x{rule.read_code:02X} · 最多 {rule.read_limit} 点"
+        target = self.target()
+        rule = RULES[target.area]
+        words = target.value_type.words
+        self.order.setEnabled(target.value_type != DataType.BOOL)
+        with QSignalBlocker(self.offset), QSignalBlocker(self.count):
+            self.offset.setMaximum(65536 - words)
+            self.count.setMaximum(min(rule.read_limit, 65536 - self.offset.value()) // words)
+        operations = f"只读 · 读取 0x{rule.read_code:02X} · 最多读 {rule.read_limit // words} 点"
         if rule.write_codes is not None:
             single, multiple = rule.write_codes
+            write_codes = f"0x{single:02X} / 0x{multiple:02X}" if words == 1 else f"0x{multiple:02X}"
             operations = (
                 f"可读写 · 读取 0x{rule.read_code:02X} · "
-                f"写入 0x{single:02X} / 0x{multiple:02X} · 最多写 {rule.write_limit} 点"
+                f"写入 {write_codes} · 最多写 {rule.write_limit // words} 点"
             )
-        self.permissions.setText(f"{operations} · 地址从 0 开始")
+        self.permissions.setText(f"{operations} · 每点占 {words} 个地址 · 偏移从 0 开始")
         self.changed.emit()
 
 
@@ -164,6 +207,9 @@ class _WriteDialog(QDialog):
         form = QFormLayout()
         form.addRow("目标设备", QLabel(endpoint))
         form.addRow("点位范围", QLabel(target.label))
+        form.addRow("数据类型", QLabel(target.value_type.value))
+        if target.value_type != DataType.BOOL:
+            form.addRow("寄存器顺序", QLabel(target.order.label))
         form.addRow("值的数量", QLabel(str(target.count)))
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 16, 18, 16)
@@ -176,13 +222,10 @@ class _WriteDialog(QDialog):
 
     def accept(self):
         fields = re.split(r"[,，\s]+", self.input.toPlainText().strip())
-        if any(not re.fullmatch(r"[0-9]{1,5}", field) for field in fields):
-            self.error.setText("请输入十进制整数，用逗号、空格或换行分隔")
-            return
-        values = tuple(int(field) for field in fields)
         try:
+            values = tuple(self.target.value_type.parse(field) for field in fields)
             self.target.validate(values)
-        except ClientError as error:
+        except (ClientError, ValueError) as error:
             self.error.setText(str(error))
             return
         self.values = values

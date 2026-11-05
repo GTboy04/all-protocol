@@ -82,39 +82,47 @@ class ModbusTcpClient:
             Area.HR: self._client.read_holding_registers, Area.IR: self._client.read_input_registers,
             Area.COIL: self._client.read_coils, Area.DI: self._client.read_discrete_inputs,
         }[point.area]
-        response = await self._exchange(operation, point.offset, count=point.count,
+        size = point.register_count
+        response = await self._exchange(operation, point.offset, count=size,
                                         code=code, device_id=point.unit_id)
         if point.area in (Area.HR, Area.IR):
             raw = response.registers
-            expected = point.count
+            expected = size
             width = 4
         else:
             raw = response.bits
-            expected = ((point.count + 7) // 8) * 8
+            expected = ((size + 7) // 8) * 8
             width = 2
         if len(raw) != expected:
             raise ClientError(ErrorKind.RESPONSE, "响应数据长度与请求数量不一致")
-        return tuple(
-            Point(str(address), f"{point.area}[{address}]", int(value), f"0x{value:0{width}X}")
-            for address, value in enumerate(raw[:point.count], start=point.offset)
-        )
+        points = []
+        words = point.value_type.words
+        for index in range(0, size, words):
+            registers = tuple(raw[index:index + words])
+            address = point.offset + index
+            value = point.value_type.decode(registers, point.order)
+            hex_value = "".join(f"{word:0{width}X}" for word in registers)
+            points.append(Point(str(address), f"{point.area}[{address}]", value, f"0x{hex_value}"))
+        return tuple(points)
 
     async def write(self, target: Target, values: tuple[Value, ...]):
         point = modbus_target(target)
         code = point.validate(values)
+        single = point.register_count == 1
+        registers = point.encode_values(values)
         if point.area == Area.HR:
-            operation = self._client.write_register if point.count == 1 else self._client.write_registers
-            payload = [int(value) for value in values]
+            operation = self._client.write_register if single else self._client.write_registers
+            payload = list(registers)
         else:
-            operation = self._client.write_coil if point.count == 1 else self._client.write_coils
-            payload = [bool(value) for value in values]
-        response = await self._exchange(operation, point.offset, payload[0] if point.count == 1 else payload,
+            operation = self._client.write_coil if single else self._client.write_coils
+            payload = list(map(bool, registers))
+        response = await self._exchange(operation, point.offset, payload[0] if single else payload,
                                         code=code, device_id=point.unit_id)
         if response.address != point.offset:
             raise ClientError(ErrorKind.RESPONSE, "写入回执地址与请求不一致")
-        if point.count == 1:
+        if single:
             echo = response.registers if point.area == Area.HR else response.bits
             if not echo or echo[0] != payload[0]:
                 raise ClientError(ErrorKind.RESPONSE, "写入回执值与请求不一致")
-        elif response.count != point.count:
+        elif response.count != point.register_count:
             raise ClientError(ErrorKind.RESPONSE, "写入回执数量与请求不一致")

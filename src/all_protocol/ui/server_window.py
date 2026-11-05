@@ -8,14 +8,15 @@ from PySide6.QtWidgets import (
     QSplitter, QTabBar, QVBoxLayout, QWidget,
 )
 
-from ..adapters.modbus_tcp.model import RULES, Area
+from ..adapters.modbus_tcp.model import RULES, Area, data_types
 from ..adapters.modbus_tcp.server import ServerRequest, ValuesChanged
 from ..adapters.modbus_tcp.server_model import ServerPlan, ServerPoint, Station
+from ..adapters.modbus_tcp.values import DataType, RegisterOrder
 from ..application.server_session import ListenerState, ListenerUpdate
 from ..storage import ServerStorage
 from .io_bridge import IoBridge
 from .main_window import Rows, _heading, _panel, _table
-from .modbus_tcp_form import spinbox
+from .modbus_tcp_form import order_picker, spinbox
 from .widgets import add_field
 
 
@@ -23,24 +24,21 @@ def _display(value):
     return "—" if value is None else str(value)
 
 
-def _point_type(area):
-    return "Bool" if RULES[area].value_limit == 1 else "UInt16"
-
-
-def _value_text(area, value):
-    if value is not None and _point_type(area) == "Bool":
+def _value_text(data_type, value):
+    if value is not None and data_type == DataType.BOOL:
         return "开" if value else "关"
     return _display(value)
 
 
-def _value_field(area, value):
-    if _point_type(area) == "Bool":
+def _value_field(data_type, value, parse=None):
+    if data_type == DataType.BOOL:
         field = QComboBox()
         field.addItems(("关", "开"))
         field.setCurrentIndex(value)
         return field, field.currentIndex
-    field = spinbox(0, 65535, value)
-    return field, field.value
+    field = QLineEdit(str(int(value)) if isinstance(value, bool) else str(value))
+    read = parse if parse is not None else data_type.parse
+    return field, lambda: read(field.text())
 
 
 def _request_row(entry: ServerRequest):
@@ -87,24 +85,22 @@ class ServerWindow(QMainWindow):
         self.setMinimumWidth(820)
         self._bridge = bridge
         self._storage = storage
-        self._return_home = return_home
         self._state = ListenerState.STOPPED
         self._closing = False
         self._stopped = False
-        self._going_home = False
         self._current = {}
         self._point_rows = {}
         self._stations = ()
         self._saved_plan = ServerPlan()
         self._load_error = False
 
-        self._build()
+        self._build(return_home)
         self._load()
         self._bridge.event.connect(self._handle_event, Qt.ConnectionType.QueuedConnection)
         self._bridge.stopped.connect(self._io_stopped, Qt.ConnectionType.QueuedConnection)
         self._refresh()
 
-    def _build(self):
+    def _build(self, return_home):
         root = QWidget()
         root.setObjectName("workspace")
         self.setCentralWidget(root)
@@ -114,7 +110,7 @@ class ServerWindow(QMainWindow):
         masthead.setObjectName("masthead")
         header = QHBoxLayout(masthead)
         home = QPushButton("返回首页")
-        home.clicked.connect(self._go_home)
+        home.clicked.connect(return_home)
         title = QLabel("Modbus TCP 服务端")
         title.setObjectName("title")
         self.status = QLabel()
@@ -282,16 +278,23 @@ class ServerWindow(QMainWindow):
         station = self._station
         points = tuple(sorted((p for p in station.points if p.area == self._area),
                               key=lambda point: point.offset)) if station else ()
-        self._point_rows = {point.offset: row for row, point in enumerate(points)}
+        self._point_rows = {address: row for row, point in enumerate(points) for address in point.addresses}
         self.points.reset(points)
         self._refresh()
 
     def _point_row(self, point):
-        key = self._station.unit_id, point.area, point.offset
         running = self._state in (ListenerState.LISTENING, ListenerState.STOPPING)
-        current = self._current.get(key, point.initial) if running else None
-        return (str(point.offset), point.name or "—", _point_type(point.area),
-                _value_text(point.area, point.initial), _value_text(point.area, current))
+        current = self._current_value(point) if running else None
+        address = str(point.offset) if len(point.addresses) == 1 else f"{point.offset}–{point.addresses[-1]}"
+        return (address, point.name or "—", str(point.value_type),
+                _value_text(point.value_type, point.initial), _value_text(point.value_type, current))
+
+    def _current_value(self, point):
+        defaults = point.encode(point.initial)
+        unit = self._station.unit_id
+        words = tuple(self._current.get((unit, point.area, address), word)
+                      for address, word in zip(point.addresses, defaults, strict=True))
+        return point.decode(words)
 
     def _edit_station(self, adding):
         original = None if adding else self._station
@@ -334,12 +337,24 @@ class ServerWindow(QMainWindow):
         offset = spinbox(0, 65535, original.offset if original else 0)
         count = spinbox(1, 65536, 1)
         name = QLineEdit(original.name if original else "")
-        initial, get_initial = _value_field(area, original.initial if original else 0)
+        types = QComboBox()
+        for data_type in data_types(area):
+            types.addItem(data_type.value, data_type.value)
+        if original:
+            types.setCurrentIndex(types.findData(original.value_type.value))
+        order = order_picker(original.order if original else RegisterOrder.BIG)
+
+        def selected_type():
+            return DataType(types.currentData())
+
+        initial, get_initial = _value_field(
+            selected_type(), original.initial if original else 0, lambda text: selected_type().parse(text))
 
         def commit():
             points = tuple(point for point in station.points if point is not original)
             updated = replace(station, points=points).add_points(
-                area, offset.value(), count.value(), get_initial(), "" if batch else name.text().strip())
+                area, offset.value(), count.value(), get_initial(), "" if batch else name.text().strip(),
+                selected_type(), RegisterOrder(order.currentData()))
             if original is not None:
                 edited = updated.points[-1]
                 updated = replace(updated, points=tuple(edited if p is original else p for p in station.points))
@@ -348,21 +363,25 @@ class ServerWindow(QMainWindow):
 
         dialog = _EditDialog(self, {"add": "新增点位", "batch": "批量添加点位", "edit": "编辑点位"}[mode], commit)
         dialog.form.addRow("从站 / 数据区", QLabel(f"Unit {station.unit_id}  ·  {RULES[area].label} {area}"))
-        dialog.form.addRow("类型 / 值范围", QLabel("Bool · 开或关" if _point_type(area) == "Bool" else "UInt16 · 0–65535"))
+        dialog.form.addRow("数据类型", types)
+        if selected_type() != DataType.BOOL:
+            dialog.form.addRow("寄存器顺序", order)
         dialog.form.addRow("起始偏移（0 基）" if batch else "偏移（0 基）", offset)
         if batch:
-            preview = QLabel()
-
-            def show_range():
-                preview.setText(f"{offset.value()}–{offset.value() + count.value() - 1}")
-
-            dialog.form.addRow("数量", count)
-            dialog.form.addRow("占用区间", preview)
-            offset.valueChanged.connect(show_range)
-            count.valueChanged.connect(show_range)
-            show_range()
+            dialog.form.addRow("点位数量", count)
         else:
             dialog.form.addRow("名称（可选）", name)
+        preview = QLabel()
+
+        def show_range():
+            end = offset.value() + count.value() * selected_type().words - 1
+            preview.setText(str(end) if end == offset.value() else f"{offset.value()}–{end}")
+
+        dialog.form.addRow("占用地址", preview)
+        for field in (offset, count):
+            field.valueChanged.connect(show_range)
+        types.currentIndexChanged.connect(show_range)
+        show_range()
         dialog.form.addRow("初始值", initial)
         dialog.exec()
 
@@ -373,10 +392,12 @@ class ServerWindow(QMainWindow):
     def _edit_current(self):
         point, station = self._point, self._station
         key = station.unit_id, point.area, point.offset
-        field, get_value = _value_field(point.area, self._current.get(key, point.initial))
+        field, get_value = _value_field(point.value_type, self._current_value(point))
 
         def commit():
-            self._bridge.submit(self._bridge.session.set_current(*key, get_value()))
+            value = get_value()
+            point.encode(value)
+            self._bridge.submit(self._bridge.session.set_current(*key, value))
 
         dialog = _EditDialog(self, "修改当前值", commit)
         dialog.form.addRow("点位", QLabel(f"Unit {station.unit_id}  ·  {point.area} / {point.offset}"))
@@ -453,15 +474,8 @@ class ServerWindow(QMainWindow):
         self.dirty.setText("有未保存修改" if self._plan() != self._saved_plan else
                            "方案未加载" if self._load_error else "已保存")
 
-    def _go_home(self):
-        self._going_home = True
-        if not self.close() and not self._closing:
-            self._going_home = False
-
     def _io_stopped(self):
         self._stopped = True
-        if self._going_home:
-            self._return_home()
         self.close()
 
     def closeEvent(self, event):

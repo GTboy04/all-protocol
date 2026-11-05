@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from ...application.contracts import ClientError, ErrorKind, Target, Value
+from .values import DataType, RegisterOrder
 
 
 class Area(StrEnum):
@@ -28,6 +29,12 @@ RULES = {
     Area.DI: AreaRule("离散输入", 0x02, 2000, 1),
 }
 
+REGISTER_TYPES = tuple(data_type for data_type in DataType if data_type != DataType.BOOL)
+
+
+def data_types(area: Area) -> tuple[DataType, ...]:
+    return (DataType.BOOL,) if RULES[area].value_limit == 1 else REGISTER_TYPES
+
 
 @dataclass(frozen=True, slots=True)
 class ModbusTcpConfig:
@@ -52,29 +59,51 @@ class ModbusTarget:
     area: Area
     offset: int
     count: int
+    data_type: DataType | None = None
+    order: RegisterOrder = RegisterOrder.BIG
+
+    @property
+    def value_type(self) -> DataType:
+        return self.data_type if self.data_type is not None else data_types(self.area)[0]
+
+    @property
+    def register_count(self) -> int:
+        return self.count * self.value_type.words
 
     @property
     def label(self) -> str:
-        address = str(self.offset) if self.count == 1 else f"{self.offset}–{self.offset + self.count - 1}"
-        return f"站 {self.unit_id} · {self.area} · {address}"
+        size = self.register_count
+        address = str(self.offset) if size == 1 else f"{self.offset}–{self.offset + size - 1}"
+        suffix = f" · {self.data_type}" if self.data_type is not None else ""
+        return f"站 {self.unit_id} · {self.area} · {address}{suffix}"
+
+    def encode_values(self, values: tuple[Value, ...]) -> tuple[int, ...]:
+        try:
+            return tuple(word for value in values for word in self.value_type.encode(value, self.order))
+        except ValueError as error:
+            raise ClientError(ErrorKind.INPUT, str(error)) from error
 
     def validate(self, values: tuple[Value, ...] | None = None) -> int:
         rule = RULES[self.area]
         if not 1 <= self.unit_id <= 255:
             raise ClientError(ErrorKind.INPUT, "Unit ID 必须在 1–255 之间")
-        if not 0 <= self.offset <= 65535 or self.offset + self.count > 65536:
+        if not isinstance(self.value_type, DataType) or self.value_type not in data_types(self.area):
+            raise ClientError(ErrorKind.INPUT, "该数据区不支持此类型")
+        if not isinstance(self.order, RegisterOrder):
+            raise ClientError(ErrorKind.INPUT, "无效的寄存器顺序")
+        if not 0 <= self.offset <= 65535 or self.offset + self.register_count > 65536:
             raise ClientError(ErrorKind.INPUT, "地址范围超出 0–65535")
         if values is None:
-            if not 1 <= self.count <= rule.read_limit:
-                raise ClientError(ErrorKind.INPUT, f"读取数量必须在 1–{rule.read_limit} 之间")
+            if not 1 <= self.register_count <= rule.read_limit:
+                raise ClientError(ErrorKind.INPUT, f"读取数量必须在 1–{rule.read_limit // self.value_type.words} 之间")
             return rule.read_code
         if rule.write_codes is None:
             raise ClientError(ErrorKind.INPUT, "当前数据区只读")
-        if not 1 <= self.count <= rule.write_limit or len(values) != self.count:
-            raise ClientError(ErrorKind.INPUT, f"写入数量需与值的个数一致，上限为 {rule.write_limit}")
-        if any(not isinstance(value, int) or not 0 <= value <= rule.value_limit for value in values):
-            raise ClientError(ErrorKind.INPUT, f"写入值必须是 0–{rule.value_limit} 的整数")
-        return rule.write_codes[0 if self.count == 1 else 1]
+        if not 1 <= self.register_count <= rule.write_limit or len(values) != self.count:
+            limit = rule.write_limit // self.value_type.words
+            raise ClientError(ErrorKind.INPUT, f"写入数量需与值的个数一致，上限为 {limit}")
+        self.encode_values(values)
+        return rule.write_codes[0 if self.register_count == 1 else 1]
 
 
 def modbus_target(target: Target) -> ModbusTarget:

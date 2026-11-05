@@ -18,8 +18,7 @@ class RoleWindow(QWidget):
         self.resize(800, 400)
         self._protocols = protocols
         self._data_dir = data_dir
-        self._bridge = None
-        self._workbench = None
+        self._workbenches = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -61,22 +60,39 @@ class RoleWindow(QWidget):
         return card
 
     def _open_client(self):
-        self._bridge = IoBridge()
-        self._open(MainWindow(self._bridge, self._protocols, LocalHistory(self._data_dir), self._return_home))
+        self._open("client", IoBridge, lambda bridge: MainWindow(
+            bridge, self._protocols, LocalHistory(self._data_dir), self._return_home))
 
     def _open_server(self):
-        self._bridge = IoBridge(ServerSession, ServerSession.stop)
-        self._open(ServerWindow(self._bridge, ServerStorage(self._data_dir), self._return_home))
+        self._open("server", lambda: IoBridge(ServerSession, ServerSession.stop),
+                   lambda bridge: ServerWindow(bridge, ServerStorage(self._data_dir), self._return_home))
 
-    def _open(self, workbench):
-        self._workbench = workbench
-        workbench.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    def _open(self, role, create_bridge, create_window):
+        if role in self._workbenches:
+            workbench, _ = self._workbenches[role]
+        else:
+            bridge = create_bridge()
+            try:
+                workbench = create_window(bridge)
+            except Exception:
+                bridge.join()
+                raise
+            self._workbenches[role] = workbench, bridge
+            workbench.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            workbench.destroyed.connect(lambda: self._workbenches.pop(role))
+        self._activate(workbench)
+
+    @staticmethod
+    def _activate(workbench):
         workbench.show()
-        self.hide()
+        if workbench.isMinimized():
+            workbench.setWindowState(workbench.windowState() & ~Qt.WindowState.WindowMinimized)
+        workbench.raise_()
+        workbench.activateWindow()
 
     def _return_home(self):
-        self.show()
+        self._activate(self)
 
     def join(self):
-        if self._bridge is not None:
-            self._bridge.join()
+        for _, bridge in self._workbenches.values():
+            bridge.join()
