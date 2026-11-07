@@ -12,6 +12,7 @@ from .adapters.modbus_tcp.values import DataType, RegisterOrder
 from .adapters.s7.model import Area as S7Area, DataType as S7DataType, S7Config, S7Target
 from .adapters.s7.server_model import S7ServerPlan
 from .application.contracts import ClientError
+from .point_tables import PointTable, decode_table, table_record
 from .storage import (
     ConnectionProfile, LocalHistory, ServerStorage, S7ServerStorage,
     _load_profile, _locked, _replace_file, decode_modbus_plan, decode_s7_plan,
@@ -59,6 +60,7 @@ class Project:
     devices: tuple[ProjectDevice, ...] = ()
     modbus: ServerPlan = field(default_factory=ServerPlan)
     s7: S7ServerPlan = field(default_factory=S7ServerPlan)
+    point_tables: tuple[PointTable, ...] = ()
 
     def remember(self, profile: ConnectionProfile) -> "Project":
         validate_profile(profile)
@@ -68,6 +70,16 @@ class Project:
         if previous is not None and previous.profile == profile:
             return self
         return replace(self, devices=(device,) + tuple(item for item in self.devices if item.id != device.id))
+
+    def with_table(self, table: PointTable) -> "Project":
+        exists = any(item.id == table.id for item in self.point_tables)
+        tables = tuple(table if item.id == table.id else item for item in self.point_tables)
+        project = replace(self, point_tables=tables if exists else tables + (table,))
+        decode_project(project_record(project))
+        return project
+
+    def without_table(self, table_id: str) -> "Project":
+        return replace(self, point_tables=tuple(item for item in self.point_tables if item.id != table_id))
 
 
 def project_record(project: Project) -> dict:
@@ -79,16 +91,17 @@ def project_record(project: Project) -> dict:
     s7 = {"schema_version": 1, "protocol": "s7", **asdict(project.s7)}
     s7["points"] = [asdict(point) for point in project.s7.points]
     return {
-        "format": "all-protocol-project", "schema_version": 1, "name": project.name,
+        "format": "all-protocol-project", "schema_version": 2, "name": project.name,
         "devices": [asdict(item) for item in project.devices],
         "servers": {"modbus-tcp": modbus, "s7": s7},
+        "point_tables": [table_record(table) for table in project.point_tables],
     }
 
 
 def decode_project(data) -> Project:
     try:
         if (not isinstance(data, dict) or data.get("format") != "all-protocol-project"
-                or type(data.get("schema_version")) is not int or data["schema_version"] != 1):
+                or type(data.get("schema_version")) is not int or data["schema_version"] not in (1, 2)):
             raise ValueError("项目格式或版本无法识别")
         name = data["name"]
         if not isinstance(name, str) or not name.strip() or len(name) > 200:
@@ -122,7 +135,28 @@ def decode_project(data) -> Project:
                 plans.append(decode(servers[protocol]))
             except (KeyError, TypeError, ValueError, ClientError) as error:
                 raise ValueError(f"servers.{protocol}：{error}") from error
-        return Project(name, tuple(devices), *plans)
+        tables, table_ids, point_ids = [], set(), set()
+        if data["schema_version"] == 1:
+            if data.get("point_tables"):
+                raise ValueError("v1 项目不允许包含点表，请使用 v2 格式")
+            raw_tables = []
+        else:
+            raw_tables = data["point_tables"]
+        if not isinstance(raw_tables, list):
+            raise ValueError("point_tables 必须是列表")
+        devices_by_id = {item.id: item for item in devices}
+        for index, raw_table in enumerate(raw_tables):
+            try:
+                device = devices_by_id[raw_table["device_id"]]
+                table = decode_table(raw_table, device.profile.protocol)
+                if table.id in table_ids or any(point.id in point_ids for point in table.points):
+                    raise ValueError("点表或点位 ID 重复")
+                table_ids.add(table.id)
+                point_ids.update(point.id for point in table.points)
+                tables.append(table)
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(f"point_tables[{index}]：{error}") from error
+        return Project(name, tuple(devices), *plans, tuple(tables))
     except (KeyError, TypeError, ClientError) as error:
         raise ValueError(f"项目字段无效：{error}") from error
 
@@ -216,8 +250,14 @@ class ProjectHistory:
 
     def forget(self, profile):
         project = self.workspace.project
-        self.workspace.project = replace(project, devices=tuple(item for item in project.devices if item.profile.key != profile.key))
+        removed = {item.id for item in project.devices if item.profile.key == profile.key}
+        self.workspace.project = replace(project, devices=tuple(item for item in project.devices if item.id not in removed),
+                                         point_tables=tuple(table for table in project.point_tables if table.device_id not in removed))
         return self.profiles()
+
+    def related_table_count(self, profile):
+        device = next((item for item in self.workspace.project.devices if item.profile.key == profile.key), None)
+        return sum(table.device_id == device.id for table in self.workspace.project.point_tables) if device else 0
 
     def recent_entries(self):
         return self.local.recent_entries()

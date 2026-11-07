@@ -52,7 +52,7 @@ def test_project_round_trip_is_portable_and_keeps_stable_ids(tmp_path):
     assert updated.devices[0].profile.interval_ms == 900
     assert original.devices[1].profile.interval_ms == 750
     record = json.loads(path.read_bytes())
-    assert set(record) == {"format", "schema_version", "name", "devices", "servers"}
+    assert set(record) == {"format", "schema_version", "name", "devices", "servers", "point_tables"}
     assert "packets" not in path.read_text(encoding="utf-8")
 
 

@@ -90,9 +90,6 @@ class RoleWindow(QWidget):
                 window = MainWindow(bridge, self._protocols, history, self._return_home)
                 if self.workspace is not None:
                     window.before_close = self._capture_client
-                    window.recent_connections.setAccessibleName("项目设备")
-                    window.recent_connections.setToolTip("选择项目设备配置，再点击连接")
-                    window.delete_recent_button.setText("移除设备…")
                 return window, bridge
             except Exception:
                 bridge.join()

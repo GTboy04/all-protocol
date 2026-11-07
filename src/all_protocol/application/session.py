@@ -9,7 +9,7 @@ from typing import cast
 
 from .contracts import (
     Client, ClientError, ClientEvents, Command, ConnectionState, ErrorKind,
-    JournalEntry, Point, ProtocolRegistration, ReadUpdate, SessionState,
+    JournalEntry, Point, ProtocolRegistration, ReadUpdate, SessionState, TableReadUpdate,
     WritableClient,
 )
 
@@ -17,7 +17,7 @@ from .contracts import (
 class Session:
     """Owns the connection and all its tasks on one asyncio event loop."""
 
-    def __init__(self, emit: Callable[[SessionState | JournalEntry | ReadUpdate], None]):
+    def __init__(self, emit: Callable[[SessionState | JournalEntry | ReadUpdate | TableReadUpdate], None]):
         self._emit = emit
         self._state = SessionState()
         self._ids = count(1)
@@ -144,7 +144,25 @@ class Session:
             self._delay = None
             self._update(busy=False, polling=False)
 
-    async def _request(self, client: Client, command: Command) -> bool:
+    async def execute_table(self, table_id: str, commands: tuple[tuple[str, Command], ...]):
+        """Read one immutable table snapshot, serially, without a polling queue."""
+        if (self._client is None or self._task is not None or self._connection_lost
+                or self._state.connection != ConnectionState.ONLINE):
+            return
+        if any(command.values is not None for _, command in commands):
+            raise ClientError(ErrorKind.INPUT, "整表读取不允许包含写请求")
+        self._task = asyncio.current_task()
+        self._update(busy=True)
+        try:
+            for point_id, command in commands:
+                if self._connection_lost or self._state.connection != ConnectionState.ONLINE:
+                    break
+                await self._request(self._client, command, read_context=(table_id, point_id))
+        finally:
+            self._task = None
+            self._update(busy=False)
+
+    async def _request(self, client: Client, command: Command, *, read_context=None) -> bool:
         start = monotonic()
         request_id = next(self._ids)
         packets = self._packets = []
@@ -156,6 +174,8 @@ class Session:
             function = client.function(command)
             if command.values is None:
                 points = await client.read(command.target)
+                if read_context is not None and len(points) != 1:
+                    raise ClientError(ErrorKind.RESPONSE, "命名点位读取应返回一个值")
             elif self._writable:
                 await cast(WritableClient, client).write(command.target, command.values)
             else:
@@ -179,7 +199,8 @@ class Session:
                             function=function, error=failure.kind if failure else None,
                             detail=self._detail(failure) if failure else "", packets=tuple(packets))
         if command.values is None:
-            self._emit(ReadUpdate(command, entry, points))
+            update = ReadUpdate(command, entry, points)
+            self._emit(TableReadUpdate(*read_context, update) if read_context else update)
         if canceled:
             raise asyncio.CancelledError
         return failure is None

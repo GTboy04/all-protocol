@@ -87,6 +87,13 @@ class ReadUpdate:
     points: tuple[Point, ...] | None
 
 
+@dataclass(frozen=True, slots=True)
+class TableReadUpdate:
+    table_id: str
+    point_id: str
+    update: ReadUpdate
+
+
 class Client(Protocol):
     async def connect(self) -> None: ...
     async def close(self) -> None: ...

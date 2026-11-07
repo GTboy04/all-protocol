@@ -63,3 +63,5 @@ R2 按设备 ID 关联点表并提升 schema 版本，提供显式迁移；不�
 当前边界：切换项目须先关闭工作窗口；只有一个活动客户端；设备名称默认端点，点表及命名管理由 R2 衔接；项目日志继续使用本机既有日志文件，本版不按项目隔离日志。未进行 Windows 发布包重打包验证。
 
 分支建立前工作区已有 S7 / 多协议服务端等未提交内容，已保留，未自动暂存、提交或合并。R1 增量涉及本文件目录、README、project.py、storage.py、main_window.py、role_window.py、server_pane.py、server_workbench.py 及两个新增项目测试文件。
+
+2026-11-07 后续分支整理：用户要求管理分支并开发 R2 后，将原有 S7/多协议工作单独保存为 `16c12ab`（保护分支 `codex/s7-workbench-baseline`，38 项测试通过），再将 R1 独立保存为 `402993b`，保留在 `codex/project-workspace-r1`。原分支及 main 未改写，未合并或推送。

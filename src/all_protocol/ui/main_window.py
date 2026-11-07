@@ -8,12 +8,12 @@ from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QSplitter,
-    QStackedWidget, QTableView, QVBoxLayout, QWidget,
+    QStackedWidget, QTableView, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ..application.contracts import (
     ClientError, Command, ConnectionState, JournalEntry, Point, ProtocolRegistration,
-    ReadUpdate, SessionState, Target, Value,
+    ReadUpdate, SessionState, TableReadUpdate, Target, Value,
 )
 from ..storage import ConnectionProfile, LocalHistory, ProfileFields, VISIBLE_LOG_ROWS
 from .io_bridge import IoBridge
@@ -151,6 +151,7 @@ class MainWindow(QMainWindow):
         self._stopped = False
         self._stopping_poll = False
         self._last_read: ReadUpdate | None = None
+        self.point_table_pane = None
 
         self.protocol = QComboBox()
         self.recent_connections = QComboBox()
@@ -160,9 +161,9 @@ class MainWindow(QMainWindow):
         self.recent_connections.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.recent_connections.setMinimumContentsLength(17)
         self.recent_connections.setMaximumWidth(320)
-        self.recent_connections.setToolTip("选择设备后填入连接配置，再点击连接")
-        self.delete_recent_button = QPushButton("删除记录…")
-        self.delete_recent_button.setToolTip("删除选中的最近连接记录")
+        self.recent_connections.setToolTip("选择项目设备配置，再点击连接" if self._project_mode else "选择设备后填入连接配置，再点击连接")
+        self.delete_recent_button = QPushButton("移除设备…" if self._project_mode else "删除记录…")
+        self.delete_recent_button.setToolTip("移除项目设备及关联点表" if self._project_mode else "删除选中的最近连接记录")
         self.connection_forms = QStackedWidget()
         self.query_forms = QStackedWidget()
         for item, form in zip(protocols, self._forms, strict=True):
@@ -215,6 +216,11 @@ class MainWindow(QMainWindow):
         self.log_table.setAccessibleName("请求日志")
         self.log_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._build()
+        if self._project_mode:
+            for form in self._forms:
+                form.connection.host.textChanged.connect(self._refresh)
+                for field in form.connection.findChildren(QSpinBox):
+                    field.valueChanged.connect(self._refresh)
 
         self.protocol.currentIndexChanged.connect(self._protocol_changed)
         self.recent_connections.activated.connect(self._select_profile)
@@ -303,7 +309,6 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.poll_button)
         query_layout.addLayout(actions)
         query_layout.addWidget(self.feedback)
-        body.addWidget(query)
 
         results, result_layout = _panel()
         result_title = QHBoxLayout()
@@ -311,16 +316,34 @@ class MainWindow(QMainWindow):
         result_title.addWidget(self.result_context)
         result_layout.addLayout(result_title)
         result_layout.addWidget(self.result_table)
+        quick = QWidget()
+        quick_layout = QVBoxLayout(quick)
+        quick_layout.setContentsMargins(0, 0, 0, 0)
+        quick_layout.addWidget(query)
+        quick_layout.addWidget(results, 1)
+        content = quick
+        if self._project_mode:
+            from .point_table_pane import PointTablePane
+            self.point_table_pane = PointTablePane(
+                self._history.workspace, self._table_device,
+                lambda: self._protocols[self.protocol.currentIndex()].create_form,
+                self._save_table_device, self._read_table, self._write_point, lambda: self._registration.writable,
+            )
+            self.point_views = QTabWidget()
+            self.point_views.setAccessibleName("点位视图")
+            self.point_views.addTab(quick, "快速读写")
+            self.point_views.addTab(self.point_table_pane, "点表")
+            content = self.point_views
         journal, journal_layout = _panel()
         journal_layout.addWidget(_heading("请求日志"))
         journal_layout.addWidget(self.log_table)
         journal_layout.addWidget(self.detail)
         split = QSplitter(Qt.Orientation.Vertical)
-        split.addWidget(results)
+        split.addWidget(content)
         split.addWidget(journal)
         split.setChildrenCollapsible(False)
         split.setHandleWidth(8)
-        split.setSizes([215, 245])
+        split.setSizes([350, 260])
         body.addWidget(split, 1)
         self.setCentralWidget(root)
 
@@ -391,6 +414,10 @@ class MainWindow(QMainWindow):
         dialog.setWindowTitle("移除项目设备" if self._project_mode else "删除连接记录")
         dialog.setTextFormat(Qt.TextFormat.PlainText)
         question = "从当前项目移除此设备？" if self._project_mode else "删除这条最近连接记录？"
+        if self._project_mode:
+            count = self._history.related_table_count(profile)
+            if count:
+                question += f"\n同时删除关联的 {count} 张点表及全部点位。"
         dialog.setText(f"{question}\n{self.recent_connections.currentText()}")
         delete_button = dialog.addButton("删除", QMessageBox.ButtonRole.DestructiveRole)
         cancel_button = dialog.addButton("取消", QMessageBox.ButtonRole.RejectRole)
@@ -487,6 +514,42 @@ class MainWindow(QMainWindow):
         if values is not None and self._state == state and not self._closing:
             self._execute(Command(target, values))
 
+    def _table_device(self):
+        try:
+            _, endpoint = self._form.connection_config()
+        except ClientError:
+            return None
+        return next((device for device in self._history.workspace.project.devices
+                     if device.profile.key == (self._registration.key, endpoint)), None)
+
+    def _save_table_device(self):
+        try:
+            _, endpoint = self._form.connection_config()
+            profile = ConnectionProfile(self._registration.key, endpoint, self._form.profile_fields(), self.interval.value())
+            self._show_profiles(self._history.remember(profile))
+        except (ClientError, ValueError) as error:
+            self.point_table_pane.feedback.setText(str(error))
+            return
+        self._refresh()
+
+    def _read_table(self, table):
+        device = self._table_device()
+        if (device is None or device.id != table.device_id or self._state.busy
+                or self._state.connection != ConnectionState.ONLINE):
+            return
+        self._state = replace(self._state, busy=True)
+        self._refresh()
+        commands = tuple((point.id, Command(point.target)) for point in table.points)
+        self._bridge.submit(self._bridge.session.execute_table(table.id, commands))
+
+    def _write_point(self, target):
+        state = self._state
+        if state.connection != ConnectionState.ONLINE or state.busy or not self._registration.writable:
+            return
+        values = self._form.confirm_write(self, state.endpoint, target)
+        if values is not None and self._state == state and not self._closing:
+            self._execute(Command(target, values))
+
     def _execute(self, command: Command, interval_ms: int | None = None):
         self.feedback.clear()
         self._remember_connection(self._state.endpoint)
@@ -524,6 +587,8 @@ class MainWindow(QMainWindow):
                 self.results.reset(event.points)
             elif self._last_read is not None:
                 self._last_read = replace(self._last_read, points=None)
+        elif isinstance(event, TableReadUpdate) and self.point_table_pane is not None:
+            self.point_table_pane.handle_read(event)
         self._refresh()
 
     def _show_detail(self, index, _previous):
@@ -578,6 +643,8 @@ class MainWindow(QMainWindow):
             if self._last_read.points is None or not online:
                 text += " · 旧数据"
         self.result_context.setText(text)
+        if self.point_table_pane is not None:
+            self.point_table_pane.refresh(state, self._closing)
 
     def _io_stopped(self):
         self._stopped = True
