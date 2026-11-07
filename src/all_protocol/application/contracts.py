@@ -67,6 +67,8 @@ class SessionState:
     queue_capacity: int = 32
     polling_groups: tuple[str, ...] = ()
     manual_tables: tuple[str, ...] = ()
+    device_id: str = ""
+    session_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +86,9 @@ class JournalEntry:
     protocol: str = ""
     endpoint: str = ""
     operation_id: int | None = None
+    device_id: str = ""
+    session_id: str = ""
+    generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +112,34 @@ class OperationRejected:
     detail: str
     generation: int
     table_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceEvent:
+    device_id: str
+    session_id: str
+    generation: int
+    runtime_id: str
+    payload: object
+    config: object | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceRemoved:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceResult:
+    device_id: str
+    successful: bool
+    detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class BatchResult:
+    operation: str
+    results: tuple[DeviceResult, ...]
 
 
 class Client(Protocol):

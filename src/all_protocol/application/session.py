@@ -51,10 +51,11 @@ class Session:
         self._emit(self._state)
 
     def _entry(self, request_id, operation, target, start, outcome, *,
-               function="", error=None, detail="", packets=(), operation_id=None):
+               function="", error=None, detail="", packets=(), operation_id=None, generation=None):
         entry = JournalEntry(request_id, datetime.now(), operation, target, function,
                              round((monotonic() - start) * 1000), outcome, error, detail, packets,
-                             protocol=self._protocol, endpoint=self._state.endpoint, operation_id=operation_id)
+                             protocol=self._protocol, endpoint=self._state.endpoint, operation_id=operation_id,
+                             generation=self._generation if generation is None else generation)
         self._emit(entry)
         return entry
 
@@ -65,10 +66,19 @@ class Session:
         self._closed.clear()
         generation = self._generation
         self._connection_lost = False
-        self._task = asyncio.current_task()
         self._protocol = protocol.key
         self._writable = protocol.writable
         self._update(connection=ConnectionState.CONNECTING, endpoint=endpoint, generation=generation)
+        # Only the owned handshake task is cancelled by disconnect, not its caller.
+        self._task = asyncio.create_task(self._connect(protocol, config, endpoint, generation))
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            if self._state.connection == ConnectionState.CONNECTING:
+                await self.disconnect()
+            raise
+
+    async def _connect(self, protocol, config, endpoint, generation):
         start = monotonic()
         request_id = next(self._ids)
         packets = self._packets = []
@@ -126,6 +136,7 @@ class Session:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+            self._task = None
         for operation in operations:
             self._record_cancelled(operation)
         self._waiters.clear()
@@ -324,7 +335,8 @@ class Session:
             outcome = failure.kind
         entry = self._entry(request_id, command.operation, command.target.label, start, outcome,
                             function=function, error=failure.kind if failure else None,
-                            detail=self._detail(failure) if failure else "", packets=tuple(packets), operation_id=operation_id)
+                            detail=self._detail(failure) if failure else "", packets=tuple(packets), operation_id=operation_id,
+                            generation=generation)
         if command.values is None:
             if read_context is None:
                 self._emit(ReadUpdate(command, entry, points if failure is None else None, generation))

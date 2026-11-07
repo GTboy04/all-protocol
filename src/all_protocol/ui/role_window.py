@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..application.contracts import ClientError
+from ..application.session_manager import SessionManager
 from ..project import Project, ProjectFile, ProjectHistory, ProjectServerStorage, ProjectWorkspace, decode_project, project_record
 from ..storage import LocalHistory, ServerStorage, S7ServerStorage
 from .io_bridge import IoBridge
@@ -82,7 +83,7 @@ class RoleWindow(QWidget):
 
     def _open_client(self):
         def create():
-            bridge = IoBridge()
+            bridge = (IoBridge(SessionManager, SessionManager.shutdown) if self.workspace is not None else IoBridge())
             try:
                 history = LocalHistory(self._data_dir)
                 if self.workspace is not None:
@@ -209,6 +210,8 @@ class RoleWindow(QWidget):
         project = self.workspace.project
         client = self._workbenches.get("client")
         if client is not None:
+            if client[0]._pending_removals:
+                raise ValueError("正在清理待移除设备，请完成后再保存项目")
             for profile in reversed(client[0].configuration_profiles()):
                 project = project.remember(profile)
         server = self._workbenches.get("server")
@@ -222,8 +225,10 @@ class RoleWindow(QWidget):
     def _capture_client(self):
         try:
             project = self.workspace.project
+            pending = {profile.key for profile in self._workbenches["client"][0]._pending_removals.values()}
             for profile in reversed(self._workbenches["client"][0].configuration_profiles()):
-                project = project.remember(profile)
+                if profile.key not in pending:
+                    project = project.remember(profile)
             self.workspace.project = project
         except (ValueError, ClientError, KeyError, TypeError) as error:
             self._project_error(error)

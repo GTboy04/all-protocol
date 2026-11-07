@@ -61,6 +61,40 @@ def wait_for(condition):
     assert condition()
 
 
+def test_unwritable_local_history_does_not_block_connection(monkeypatch, tmp_path):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+
+    class Client:
+        def __init__(self, *_args):
+            pass
+
+        async def connect(self):
+            pass
+
+        async def close(self):
+            pass
+
+    history = LocalHistory(tmp_path)
+
+    def fail(_profile):
+        raise OSError("模拟历史文件不可写")
+
+    monkeypatch.setattr(history, "remember", fail)
+    bridge = IoBridge()
+    window = MainWindow(bridge, (DesktopProtocol(ProtocolRegistration("modbus-tcp", "Modbus", Client), ModbusTcpForm),), history)
+    try:
+        window._form.connection.host.setText("127.0.0.1")
+        window.show()
+        window.connection_button.click()
+        wait_for(lambda: window._state.connection == ConnectionState.ONLINE)
+        assert "无法保存最近连接" in window.statusBar().currentMessage()
+    finally:
+        bridge.join()
+        window.close()
+        app.processEvents()
+
+
 def test_window_can_run_a_named_point_protocol(monkeypatch):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     app = QApplication.instance() or QApplication([])

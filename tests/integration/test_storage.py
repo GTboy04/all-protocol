@@ -18,6 +18,19 @@ def test_old_journal_without_operation_id_remains_readable(tmp_path):
     assert history.recent_entries() == (replace(entry, operation_id=None),)
 
 
+def test_device_session_metadata_round_trips_and_r3_journal_stays_readable(tmp_path):
+    history = LocalHistory(tmp_path)
+    entry = JournalEntry(1, datetime(2026, 11, 7), "读取", "point", "read", 1, "成功",
+                         device_id="device-a", session_id="connection-uuid", generation=3)
+    history.append_entry(entry)
+    assert history.recent_entries() == (entry,)
+    record = json.loads(history.journal_path.read_bytes())
+    for name in ("device_id", "session_id", "generation"):
+        record.pop(name)
+    history.journal_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    assert history.recent_entries() == (replace(entry, device_id="", session_id="", generation=0),)
+
+
 def test_profiles_merge_by_protocol_and_endpoint(tmp_path):
     modbus = ConnectionProfile("modbus-tcp", "192.0.2.1:502", {"timeout_ms": 1000}, 200)
     other_protocol = replace(modbus, protocol="other")

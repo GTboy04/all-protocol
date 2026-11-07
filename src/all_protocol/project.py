@@ -45,6 +45,7 @@ def validate_profile(profile: ConnectionProfile):
     target.validate()
     if config.endpoint != profile.endpoint:
         raise ValueError("设备端点与连接字段不一致")
+    return config
 
 
 @dataclass(frozen=True)

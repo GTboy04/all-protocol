@@ -152,6 +152,7 @@ class PointTablePane(QWidget):
         self._context = None
         self._tables = ()
         self.samples = SampleStore()
+        self.sample_device_id = None
         self._definitions = None
         self._dirty = set()
         self._pending = set()
@@ -269,7 +270,9 @@ class PointTablePane(QWidget):
         self.state, self.closing = state, closing
         definitions = self.workspace.project.point_tables
         if definitions is not self._definitions:
-            self._dirty.update(self.samples.sync(definitions))
+            scoped = definitions if self.sample_device_id is None else tuple(
+                table for table in definitions if table.device_id == self.sample_device_id)
+            self._dirty.update(self.samples.sync(scoped))
             self._definitions = definitions
         self._dirty.update(self.samples.set_generation(state.generation))
         if state.connection != ConnectionState.ONLINE:

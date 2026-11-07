@@ -12,9 +12,12 @@ from PySide6.QtWidgets import (
 )
 
 from ..application.contracts import (
-    ClientError, Command, ConnectionState, JournalEntry, OperationRejected, Point, ProtocolRegistration,
+    BatchResult, ClientError, Command, ConnectionState, DeviceEvent, DeviceRemoved, JournalEntry, OperationRejected, Point, ProtocolRegistration,
     ReadUpdate, SessionState, TableReadUpdate, Target, Value,
 )
+from ..application.session_manager import SessionManager
+from ..application.sampling import SampleStore
+from ..project import validate_profile
 from ..storage import ConnectionProfile, LocalHistory, ProfileFields, VISIBLE_LOG_ROWS
 from .io_bridge import IoBridge
 from .widgets import add_field
@@ -93,6 +96,13 @@ class Rows[T](QAbstractTableModel):
         self.items.insert(0, item)
         self.endInsertRows()
 
+    def discard_oldest(self, item: T):
+        if self.items and self.items[-1] == item:
+            row = len(self.items) - 1
+            self.beginRemoveRows(QModelIndex(), row, row)
+            self.items.pop()
+            self.endRemoveRows()
+
 
 def _table(model: Rows) -> QTableView:
     table = QTableView()
@@ -138,6 +148,19 @@ class MainWindow(QMainWindow):
         self.resize(1120, 800)
         self.setMinimumWidth(640)
         self._bridge = bridge
+        self._managed = isinstance(bridge.session, SessionManager)
+        self._active_device_id = None
+        self._device_states = {}
+        self._device_tokens = {}
+        self._retired_tokens = set()
+        self._sample_stores = {}
+        self._sample_definitions = {}
+        self._last_reads = {}
+        self._quick_values = {}
+        self._all_entries = []
+        self._pending_removals = {}
+        self._device_errors = {}
+        self._connection_configs = {}
         self._history = history
         self._project_mode = bool(getattr(history, "project_mode", False))
         self._return_home = return_home
@@ -243,6 +266,59 @@ class MainWindow(QMainWindow):
     def _registration(self) -> ProtocolRegistration:
         return self._protocols[self.protocol.currentIndex()].protocol
 
+    @property
+    def _session(self):
+        return self._bridge.session.for_device(self._active_device_id) if self._managed else self._bridge.session
+
+    def _device_for_profile(self, profile):
+        return next((item for item in self._history.workspace.project.devices if item.profile.key == profile.key), None)
+
+    def _validate_runtime_config(self, profile):
+        if not self._managed:
+            return
+        device = self._device_for_profile(profile)
+        if device is None:
+            return
+        state = self._device_states.get(device.id, SessionState())
+        config = self._connection_configs.get(device.id)
+        if state.connection != ConnectionState.OFFLINE and config is not None and validate_profile(profile) != config:
+            raise ValueError(f"设备「{device.name}」正在运行，请先断开再修改连接参数")
+
+    def _samples_for(self, device_id):
+        store = self._sample_stores.setdefault(device_id, SampleStore())
+        definitions = self._history.workspace.project.point_tables
+        if self._sample_definitions.get(device_id) is not definitions:
+            store.sync(tuple(table for table in definitions if table.device_id == device_id))
+            self._sample_definitions[device_id] = definitions
+        return store
+
+    def _bind_device(self, device_id):
+        if not self._managed or device_id == self._active_device_id:
+            return
+        previous = self._active_device_id
+        if previous is not None:
+            self._device_states[previous] = self._state
+            self._last_reads[previous] = self._last_read
+            self._quick_values[previous] = tuple(self.results.items)
+        self._active_device_id = device_id
+        self._state = self._device_states.get(device_id, SessionState(device_id=device_id or ""))
+        self._last_read = None
+        self.results.reset()
+        pane = self.point_table_pane
+        if pane is not None:
+            pane.samples = self._samples_for(device_id)
+            pane.sample_device_id = device_id or "__draft__"
+            pane._definitions = None
+            pane._pending.clear()
+            pane._dirty.clear()
+        self._show_device_journal()
+
+    def _restore_device_read(self):
+        update = self._last_reads.get(self._active_device_id)
+        if update is not None and update.command.target == self._form.target():
+            self._last_read = update
+            self.results.reset(self._quick_values.get(self._active_device_id, ()))
+
     def _build(self):
         root = QWidget()
         root.setObjectName("workspace")
@@ -291,6 +367,22 @@ class MainWindow(QMainWindow):
         settings.addWidget(self.connection_forms, 1)
         settings.addWidget(self.connection_button, alignment=Qt.AlignmentFlag.AlignBottom)
         connection_layout.addLayout(settings)
+        if self._managed:
+            controls = QHBoxLayout()
+            self.new_device_button = QPushButton("新增设备")
+            self.connect_all_button = QPushButton("连接全部")
+            self.disconnect_all_button = QPushButton("断开全部")
+            for button, callback in ((self.new_device_button, self._new_device),
+                                     (self.connect_all_button, self._connect_all),
+                                     (self.disconnect_all_button, self._disconnect_all)):
+                button.clicked.connect(callback)
+                controls.addWidget(button)
+            self.batch_status = QLabel()
+            self.batch_status.setTextFormat(Qt.TextFormat.PlainText)
+            controls.addWidget(self.batch_status, 1)
+            self.overview = QLabel()
+            controls.addWidget(self.overview)
+            connection_layout.addLayout(controls)
         body.addWidget(connection)
 
         query, query_layout = _panel()
@@ -356,7 +448,9 @@ class MainWindow(QMainWindow):
         if self._history is None:
             return
         try:
-            self.journal.reset(self._history.recent_entries())
+            entries = self._history.recent_entries()
+            self.journal.reset(entries)
+            self._all_entries = list(entries)
         except OSError:
             self._history_failure("无法读取本地请求日志")
         try:
@@ -393,6 +487,9 @@ class MainWindow(QMainWindow):
             index = next(i for i in range(self.recent_connections.count())
                          if self.recent_connections.itemData(i).key == key)
             profile = self.recent_connections.itemData(index)
+        if self._managed:
+            device = self._device_for_profile(profile)
+            self._bind_device(device.id if device else None)
         self.recent_connections.setCurrentIndex(index)
         protocol_index = self.protocol.findData(profile.protocol)
         form = self._forms[protocol_index]
@@ -406,6 +503,10 @@ class MainWindow(QMainWindow):
         self.protocol.setCurrentIndex(protocol_index)
         self.interval.setValue(profile.interval_ms)
         self._query_changed()
+        if self._managed:
+            self._restore_device_read()
+            self._show_device_journal()
+            self._refresh()
 
     def _delete_profile(self):
         profile = self.recent_connections.currentData()
@@ -419,6 +520,8 @@ class MainWindow(QMainWindow):
             count = self._history.related_table_count(profile)
             if count:
                 question += f"\n同时删除关联的 {count} 张点表及全部点位。"
+        if self._managed:
+            question += "\n若设备仍在运行，将先断开并清理该设备任务。"
         dialog.setText(f"{question}\n{self.recent_connections.currentText()}")
         delete_button = dialog.addButton("删除", QMessageBox.ButtonRole.DestructiveRole)
         cancel_button = dialog.addButton("取消", QMessageBox.ButtonRole.RejectRole)
@@ -428,6 +531,15 @@ class MainWindow(QMainWindow):
         confirmed = dialog.clickedButton() is delete_button
         dialog.deleteLater()
         if not confirmed:
+            return
+        if self._managed:
+            device = self._device_for_profile(profile)
+            if device is not None:
+                self._pending_removals[device.id] = profile
+                if device.id == self._active_device_id:
+                    self._state = replace(self._state, connection=ConnectionState.CLOSING)
+                self._bridge.submit(self._bridge.session.remove(device.id))
+                self._refresh()
             return
         try:
             profiles = self._history.forget(profile)
@@ -443,13 +555,17 @@ class MainWindow(QMainWindow):
     def _remember_connection(self, endpoint: str):
         form = self._form
         if self._history is None or not isinstance(form, ProfileForm):
-            return
+            return True
         try:
             profile = ConnectionProfile(self._registration.key, endpoint, form.profile_fields(), self.interval.value())
+            self._validate_runtime_config(profile)
             profiles = self._history.remember(profile)
-        except (ClientError, OSError):
+        except OSError:
             self._history_failure("无法保存最近连接")
-            return
+            return True  # Local history is best-effort and must not block I/O.
+        except (ClientError, ValueError) as error:
+            self.feedback.setText(f"无法保存设备配置 · {error}")
+            return False
         if profiles != self._profiles:
             self._show_profiles(profiles)
         key = self._registration.key, endpoint
@@ -457,6 +573,10 @@ class MainWindow(QMainWindow):
             (index for index in range(self.recent_connections.count())
              if self.recent_connections.itemData(index).key == key), -1,
         ))
+        if self._managed:
+            device = self._device_for_profile(profile)
+            self._bind_device(device.id)
+        return True
 
     def configuration_profiles(self) -> tuple[ConnectionProfile, ...]:
         """Capture configured forms without issuing network operations."""
@@ -469,7 +589,9 @@ class MainWindow(QMainWindow):
             if fields is not None and not fields.text().strip():
                 continue
             _, endpoint = form.connection_config()
-            profiles.append(ConnectionProfile(item.protocol.key, endpoint, form.profile_fields(), self._form_intervals[index]))
+            profile = ConnectionProfile(item.protocol.key, endpoint, form.profile_fields(), self._form_intervals[index])
+            self._validate_runtime_config(profile)
+            profiles.append(profile)
         return tuple(profiles)
 
     def _interval_changed(self, value):
@@ -489,9 +611,9 @@ class MainWindow(QMainWindow):
         self._refresh()
 
     def _toggle_connection(self):
-        if self._state.connection == ConnectionState.ONLINE:
+        if self._state.connection == ConnectionState.ONLINE or (self._managed and self._state.connection == ConnectionState.CONNECTING):
             self._state = replace(self._state, connection=ConnectionState.CLOSING)
-            self._bridge.submit(self._bridge.session.disconnect())
+            self._bridge.submit(self._session.disconnect())
         elif self._state.connection == ConnectionState.OFFLINE:
             try:
                 config, endpoint = self._form.connection_config()
@@ -500,9 +622,15 @@ class MainWindow(QMainWindow):
                 self._refresh()
                 return
             self._query_changed()
+            if not self._remember_connection(endpoint):
+                self._refresh()
+                return
+            if self._managed and self._state.connection != ConnectionState.OFFLINE:
+                self._restore_device_read()
+                self._refresh()
+                return
             self._state = replace(self._state, connection=ConnectionState.CONNECTING, endpoint=endpoint)
-            self._remember_connection(endpoint)
-            self._bridge.submit(self._bridge.session.connect(self._registration, config, endpoint))
+            self._bridge.submit(self._session.connect(self._registration, config, endpoint))
         self._refresh()
 
     def _read(self):
@@ -521,13 +649,17 @@ class MainWindow(QMainWindow):
         except ClientError:
             return None
         return next((device for device in self._history.workspace.project.devices
-                     if device.profile.key == (self._registration.key, endpoint)), None)
+                     if device.profile.key == (self._registration.key, endpoint)
+                     and (not self._managed or device.id == self._active_device_id)), None)
 
     def _save_table_device(self):
         try:
             _, endpoint = self._form.connection_config()
             profile = ConnectionProfile(self._registration.key, endpoint, self._form.profile_fields(), self.interval.value())
+            self._validate_runtime_config(profile)
             self._show_profiles(self._history.remember(profile))
+            if self._managed:
+                self._bind_device(self._device_for_profile(profile).id)
         except (ClientError, ValueError) as error:
             self.point_table_pane.feedback.setText(str(error))
             return
@@ -542,7 +674,7 @@ class MainWindow(QMainWindow):
                               manual_tables=tuple(set(self._state.manual_tables) | {table.id}))
         self._refresh()
         commands = tuple((point.id, Command(point.target)) for point in table.points)
-        self._bridge.submit(self._bridge.session.execute_table(table.id, commands))
+        self._bridge.submit(self._session.execute_table(table.id, commands))
 
     def _write_point(self, target):
         state = self._state
@@ -558,33 +690,206 @@ class MainWindow(QMainWindow):
         self._state = replace(self._state, busy=True, queued=self._state.queued + int(interval_ms is None),
                               polling=self._state.polling or interval_ms is not None)
         self._refresh()
-        self._bridge.submit(self._bridge.session.execute(command, interval_ms))
+        self._bridge.submit(self._session.execute(command, interval_ms))
 
     def _same_connection(self, state):
         return (self._state.connection == ConnectionState.ONLINE and self._state.generation == state.generation
-                and self._state.endpoint == state.endpoint and not self._closing)
+                and self._state.endpoint == state.endpoint and self._state.device_id == state.device_id
+                and self._state.session_id == state.session_id and not self._closing)
 
     def _poll_table(self, table, start):
         if start:
             self._state = replace(self._state, polling_groups=self._state.polling_groups + (table.id,))
             commands = tuple((point.id, Command(point.target)) for point in table.points)
-            self._bridge.submit(self._bridge.session.start_table_polling(table.id, commands, table.interval_ms))
+            self._bridge.submit(self._session.start_table_polling(table.id, commands, table.interval_ms))
         else:
-            self._bridge.submit(self._bridge.session.stop_table_polling(table.id))
+            self._bridge.submit(self._session.stop_table_polling(table.id))
         self._refresh()
 
     def _stop_all_polling(self):
-        self._bridge.submit(self._bridge.session.stop_all_polling())
+        self._bridge.submit(self._session.stop_all_polling())
 
     def _toggle_poll(self):
         if self._state.polling:
             self._stopping_poll = True
             self._refresh()
-            self._bridge.submit(self._bridge.session.stop_polling())
+            self._bridge.submit(self._session.stop_polling())
         else:
             self._execute(Command(self._form.target()), self.interval.value())
 
+    def _new_device(self):
+        if self.before_close is not None and not self.before_close():
+            return
+        self._bind_device(None)
+        self._form.connection.host.clear()
+        self.recent_connections.setCurrentIndex(-1)
+        self._query_changed()
+
+    def _connect_all(self):
+        if self.before_close is not None and not self.before_close():
+            return
+        specifications = []
+        try:
+            for device in self._history.workspace.project.devices:
+                protocol = next(item.protocol for item in self._protocols if item.protocol.key == device.profile.protocol)
+                config = validate_profile(device.profile)
+                specifications.append((device.id, protocol, config, device.profile.endpoint))
+        except (ClientError, ValueError, StopIteration) as error:
+            self.feedback.setText(f"无法准备设备配置 · {error}")
+            self._refresh()
+            return
+        self.batch_status.setText("正在逐台连接…")
+        self._bridge.submit(self._bridge.session.connect_all(tuple(specifications)))
+
+    def _disconnect_all(self):
+        self.batch_status.setText("正在清理全部连接…")
+        self._bridge.submit(self._bridge.session.disconnect_all())
+
+    def _show_device_journal(self):
+        if self._managed:
+            self.journal.reset(tuple(entry for entry in self._all_entries if self._entry_visible(entry)))
+            self.detail.clear()
+
+    def _entry_visible(self, entry):
+        if not self._managed or self._active_device_id is None:
+            return True
+        if entry.device_id:
+            return entry.device_id == self._active_device_id
+        device = next((item for item in self._history.workspace.project.devices if item.id == self._active_device_id), None)
+        return bool(device and entry.protocol == device.profile.protocol and entry.endpoint == device.profile.endpoint)
+
+    def _append_journal(self, entry):
+        if self._history is not None:
+            try:
+                if self._history.append_entry(entry):
+                    self._all_entries.clear()
+                    self.journal.reset()
+                    self.detail.clear()
+            except OSError:
+                self._history_failure("无法保存本地请求日志")
+        self._all_entries.insert(0, entry)
+        expired = self._all_entries[VISIBLE_LOG_ROWS:]
+        del self._all_entries[VISIBLE_LOG_ROWS:]
+        if self._entry_visible(entry):
+            self.journal.prepend(entry)
+        if self._managed:
+            for old in expired:
+                self.journal.discard_oldest(old)
+
+    def _complete_removal(self, device_id):
+        profile = self._pending_removals.pop(device_id, None)
+        if profile is not None:
+            try:
+                self._history.forget(profile)
+            except OSError:
+                self._history_failure("设备已断开，但无法移除配置")
+                return
+        token = self._device_tokens.pop(device_id, None)
+        if token:
+            self._retired_tokens.add(token)
+        if device_id == self._active_device_id:
+            self._bind_device(None)
+        for form in self._forms:
+            try:
+                _, endpoint = form.connection_config()
+            except ClientError:
+                continue
+            if profile is not None and endpoint == profile.endpoint:
+                form.connection.host.clear()
+        for cache in (self._device_states, self._last_reads, self._quick_values, self._sample_stores,
+                      self._sample_definitions, self._device_errors, self._connection_configs):
+            cache.pop(device_id, None)
+        self._show_profiles(self._history.profiles())
+        self._show_device_journal()
+        self._refresh()
+
+    def _handle_device_event(self, event):
+        payload, device_id = event.payload, event.device_id
+        if isinstance(payload, BatchResult):
+            succeeded = sum(result.successful for result in payload.results)
+            failed = len(payload.results) - succeeded
+            self.batch_status.setText(f"批量{payload.operation}：成功 {succeeded}，失败 {failed}")
+            names = {item.id: item.name for item in self._history.workspace.project.devices}
+            self.batch_status.setToolTip("\n".join(
+                f"{names.get(result.device_id, result.device_id)}：{'成功' if result.successful else '失败'} {result.detail}"
+                for result in payload.results))
+            return
+        if not any(device.id == device_id for device in self._history.workspace.project.devices):
+            return
+        if event.runtime_id in self._retired_tokens:
+            return
+        expected = self._device_tokens.get(device_id)
+        if event.runtime_id and expected is not None and event.runtime_id != expected:
+            return
+        if event.runtime_id:
+            self._device_tokens[device_id] = event.runtime_id
+        if isinstance(payload, DeviceRemoved):
+            self._complete_removal(device_id)
+            return
+        state = self._device_states.get(device_id, SessionState(device_id=device_id))
+        if isinstance(payload, JournalEntry):
+            self._append_journal(payload)
+            if payload.operation == "连接":
+                self._device_errors[device_id] = payload.detail if payload.error else ""
+            if device_id == self._active_device_id and (payload.error or payload.operation == "写入"):
+                self.feedback.setText(f"{payload.outcome} · {payload.detail}" if payload.detail else payload.outcome)
+        elif event.generation < state.generation:
+            return
+        elif isinstance(payload, SessionState):
+            self._device_states[device_id] = payload
+            if event.config is not None:
+                self._connection_configs[device_id] = event.config
+            if device_id == self._active_device_id:
+                self._handle_event(payload)
+                return
+            store = self._samples_for(device_id)
+            store.set_generation(payload.generation)
+            if payload.connection != ConnectionState.ONLINE:
+                store.disconnect()
+        elif isinstance(payload, ReadUpdate):
+            previous = self._last_reads.get(device_id)
+            if payload.points is not None:
+                self._last_reads[device_id] = payload
+                self._quick_values[device_id] = payload.points
+            elif previous is not None and previous.command.target == payload.command.target:
+                self._last_reads[device_id] = replace(previous, points=None)
+            if device_id == self._active_device_id:
+                self._handle_event(payload)
+                return
+        elif isinstance(payload, TableReadUpdate):
+            if device_id == self._active_device_id:
+                self._handle_event(payload)
+                return
+            store = self._samples_for(device_id)
+            store.set_generation(state.generation)
+            store.update(payload)
+        elif isinstance(payload, OperationRejected) and device_id == self._active_device_id:
+            self._handle_event(payload)
+            return
+        self._refresh()
+
+    def _refresh_device_labels(self):
+        devices = {item.profile.key: item for item in self._history.workspace.project.devices}
+        for index in range(self.recent_connections.count()):
+            profile = self.recent_connections.itemData(index)
+            device = devices.get(profile.key)
+            if device is None:
+                continue
+            state = self._device_states.get(device.id, SessionState())
+            self.recent_connections.setItemText(index, f"[{state.connection}] {self.protocol.itemText(self.protocol.findData(profile.protocol))} · {profile.endpoint}")
+            self.recent_connections.setItemData(index, self._device_errors.get(device.id) or profile.endpoint, Qt.ItemDataRole.ToolTipRole)
+        states = [self._device_states.get(item.id, SessionState()) for item in devices.values()]
+        online = sum(state.connection == ConnectionState.ONLINE for state in states)
+        pending = sum(state.connection in (ConnectionState.CONNECTING, ConnectionState.CLOSING) for state in states)
+        self.overview.setText(f"已连接 {online}/{len(devices)} · 处理中 {pending}")
+        self.new_device_button.setEnabled(not self._closing)
+        self.connect_all_button.setEnabled(bool(devices) and not self._closing)
+        self.disconnect_all_button.setEnabled(bool(online or pending) and not self._closing)
+
     def _handle_event(self, event):
+        if isinstance(event, DeviceEvent):
+            self._handle_device_event(event)
+            return
         if isinstance(event, SessionState):
             if event.generation < self._state.generation:
                 return
@@ -592,14 +897,7 @@ class MainWindow(QMainWindow):
             if not event.polling:
                 self._stopping_poll = False
         elif isinstance(event, JournalEntry):
-            if self._history is not None:
-                try:
-                    if self._history.append_entry(event):
-                        self.journal.reset()
-                        self.detail.clear()
-                except OSError:
-                    self._history_failure("无法保存本地请求日志")
-            self.journal.prepend(event)
+            self._append_journal(event)
             if event.error or event.operation == "写入":
                 self.feedback.setText(f"{event.outcome} · {event.detail}" if event.detail else event.outcome)
         elif isinstance(event, ReadUpdate) and event.generation == self._state.generation and event.command.target == self._form.target():
@@ -629,6 +927,8 @@ class MainWindow(QMainWindow):
                  f"#{entry.request_id}  {entry.operation}  {entry.target}  {entry.outcome}"]
         if entry.operation_id is not None:
             lines.append(f"任务 #{entry.operation_id}")
+        if entry.device_id:
+            lines.append(f"设备 {entry.device_id}  会话 {entry.session_id}  代次 {entry.generation}")
         if entry.detail:
             lines.append(entry.detail)
         for sending, data in entry.packets:
@@ -650,12 +950,14 @@ class MainWindow(QMainWindow):
             style.unpolish(self.connection_status)
             style.polish(self.connection_status)
         self.feedback.setVisible(bool(self.feedback.text()))
-        self.connection_button.setText("断开连接" if online else "连接")
-        self.connection_button.setEnabled((online or offline) and not self._closing)
+        cancelling = self._managed and state.connection == ConnectionState.CONNECTING
+        self.connection_button.setText("取消连接" if cancelling else "断开连接" if online else "连接")
+        self.connection_button.setEnabled((online or offline or cancelling) and not self._closing)
         self.protocol.setEnabled(offline and len(self._forms) > 1 and not self._closing)
-        history_available = offline and not self._closing
+        history_available = (self._managed or offline) and not self._closing
         self.recent_connections.setEnabled(history_available and self.recent_connections.count() > 0)
-        self.delete_recent_button.setEnabled(history_available and self.recent_connections.currentIndex() >= 0)
+        self.delete_recent_button.setEnabled(history_available and self.recent_connections.currentIndex() >= 0
+                                            and self._active_device_id not in self._pending_removals)
         self.connection_forms.setEnabled(offline and not self._closing)
         self.query_forms.setEnabled((offline or idle) and not self._closing)
         self.read_button.setEnabled(idle)
@@ -673,6 +975,10 @@ class MainWindow(QMainWindow):
         self.result_context.setText(text)
         if self.point_table_pane is not None:
             self.point_table_pane.refresh(state, self._closing)
+        if self._managed:
+            if self._active_device_id is not None:
+                self._device_states[self._active_device_id] = state
+            self._refresh_device_labels()
 
     def _io_stopped(self):
         self._stopped = True

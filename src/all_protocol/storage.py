@@ -73,6 +73,11 @@ def _load_entry(line: bytes) -> JournalEntry:
         raise ValueError("Invalid journal number")
     if data.get("operation_id") is not None and type(data["operation_id"]) is not int:
         raise ValueError("Invalid operation ID")
+    for field in ("device_id", "session_id"):
+        if field in data and not isinstance(data[field], str):
+            raise ValueError(f"Invalid journal field {field}")
+    if "generation" in data and type(data["generation"]) is not int:
+        raise ValueError("Invalid session generation")
     data["time"] = datetime.fromisoformat(data["time"])
     data["error"] = ErrorKind(data["error"]) if data["error"] is not None else None
     data["packets"] = tuple((sending, bytes.fromhex(payload)) for sending, payload in data["packets"])

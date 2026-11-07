@@ -173,6 +173,12 @@ def test_closed_client_edits_survive_and_removed_device_is_not_readded(desktop, 
     client = home._workbenches["client"][0]
     QTimer.singleShot(0, lambda: choose_button(app, QMessageBox.ButtonRole.DestructiveRole))
     client.delete_recent_button.click()
+    for _ in range(50):
+        app.processEvents()
+        if not home.workspace.project.devices:
+            break
+        QTest.qWait(10)
+    assert not home.workspace.project.devices
     path = tmp_path / "project.json"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(path), ""))
     assert home._save_project()
