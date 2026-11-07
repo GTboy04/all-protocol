@@ -3,14 +3,17 @@ from time import monotonic
 
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
+from PySide6.QtWidgets import QApplication, QDialogButtonBox, QMessageBox, QWidget
 
 from all_protocol.adapters.modbus_tcp.model import Area, ModbusTarget, ModbusTcpConfig
+from all_protocol.adapters.s7.model import Area as S7Area
+from all_protocol.adapters.s7.model import DataType, S7Config, S7Target
 from all_protocol.application.contracts import ConnectionState, Point, ProtocolRegistration
 from all_protocol.storage import LocalHistory
 from all_protocol.ui.io_bridge import IoBridge
 from all_protocol.ui.main_window import DesktopProtocol, MainWindow
 from all_protocol.ui.modbus_tcp_form import ModbusTcpForm
+from all_protocol.ui.s7_form import S7Form
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,88 @@ def test_window_can_run_a_named_point_protocol(monkeypatch):
         window.close()
         wait_for(lambda: not window.isVisible())
         assert window.journal.items[0].operation == "断开"
+    finally:
+        bridge.join()
+        window.close()
+        app.processEvents()
+
+
+def test_s7_workbench_writes_typed_value_and_restores_profile(monkeypatch, tmp_path):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
+    config = S7Config("192.0.2.1", rack=1, slot=3)
+    written = []
+
+    class TestClient:
+        def __init__(self, actual_config, events):
+            assert actual_config == config
+
+        async def connect(self):
+            pass
+
+        async def close(self):
+            pass
+
+        def function(self, command):
+            return "Write Var (0x05)" if command.values is not None else "Read Var (0x04)"
+
+        async def read(self, target):
+            return target.decode(bytes.fromhex("FF 85"))
+
+        async def write(self, target, values):
+            written.append((target, target.encode(values)))
+
+    protocols = (
+        DesktopProtocol(ProtocolRegistration("modbus-tcp", "Modbus TCP", TestClient, True), ModbusTcpForm),
+        DesktopProtocol(ProtocolRegistration("s7", "Siemens S7", TestClient, True), S7Form),
+    )
+    history = LocalHistory(tmp_path)
+    bridge = IoBridge()
+    window = MainWindow(bridge, protocols, history)
+    try:
+        window.show()
+        window.protocol.setCurrentIndex(window.protocol.findData("s7"))
+        form = window._form
+        form.connection.host.setText(config.host)
+        form.connection.rack.setValue(config.rack)
+        form.connection.slot.setValue(config.slot)
+        window.connection_button.click()
+        wait_for(window.read_button.isEnabled)
+        assert not window.protocol.isEnabled()
+        query = form.query
+        query.area.setCurrentIndex(query.area.findData("I"))
+        assert not window.write_button.isEnabled() and not query.db.isEnabled()
+        query.area.setCurrentIndex(query.area.findData("DB"))
+        query.db.setValue(10)
+        query.offset.setValue(4)
+        query.data_type.setCurrentIndex(query.data_type.findData("Int"))
+        target = S7Target(S7Area.DB, 10, 4, DataType.INT)
+        assert form.target() == target and window.write_button.isEnabled()
+
+        def confirm():
+            dialog = app.activeModalWidget()
+            dialog.input.setPlainText("-123")
+            dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Ok).click()
+
+        QTimer.singleShot(0, confirm)
+        window.write_button.click()
+        wait_for(lambda: written and window.read_button.isEnabled())
+        assert written == [(target, b"\xFF\x85")]
+        window.interval.setValue(200)
+        window.poll_button.click()
+        wait_for(lambda: window.results.rowCount() == 1 and window.journal.rowCount() >= 4)
+        window.poll_button.click()
+        wait_for(window.read_button.isEnabled)
+        assert window.results.items[0].value == -123
+
+        saved, = history.profiles()
+        restored = S7Form()
+        restored.restore_profile(saved.fields)
+        assert saved.protocol == "s7" and saved.endpoint == config.endpoint and saved.interval_ms == 200
+        assert restored.connection_config() == (config, config.endpoint)
+        assert restored.target() == target
+        window.close()
+        wait_for(lambda: not window.isVisible())
     finally:
         bridge.join()
         window.close()

@@ -202,7 +202,8 @@ def test_role_window_runs_client_and_server_together(tmp_path, monkeypatch):
             return next(item for item in parent.findChildren(QPushButton) if item.text() == label)
 
         button(role, "进入服务端").click()
-        window, _ = role._workbenches["server"]
+        workbench, _ = role._workbenches["server"]
+        window = workbench.tabs.currentWidget()
         assert role.isVisible()
         assert window.status.text() == "已停止"
         assert window.points.index(0, 4).data() == "—"
@@ -239,12 +240,12 @@ def test_role_window_runs_client_and_server_together(tmp_path, monkeypatch):
         wait_for(lambda: window.points.index(0, 4).data() == "1300")
         assert window.points.index(1, 0).data() == "1–2"
 
-        button(window, "返回首页").click()
+        button(workbench, "返回首页").click()
         assert window.status.text() == "监听中"
         button(role, "进入客户端").click()
         client, _ = role._workbenches["client"]
         button(role, "进入服务端").click()
-        assert role._workbenches["server"][0] is window
+        assert role._workbenches["server"][0] is workbench
         form = client._form
         form.connection.host.setText("127.0.0.1")
         form.connection.port.setValue(port)
@@ -287,10 +288,10 @@ def test_role_window_runs_client_and_server_together(tmp_path, monkeypatch):
             next(button for button in prompt.buttons() if button.text() == label).click()
 
         QTimer.singleShot(0, lambda: choose("取消"))
-        window.close()
+        workbench.close()
         assert window.isVisible()
         QTimer.singleShot(0, lambda: choose("放弃修改"))
-        window.close()
+        workbench.close()
         wait_for(lambda: "server" not in role._workbenches)
         assert ServerStorage(tmp_path).load_plan().host == "127.0.0.1"
     finally:

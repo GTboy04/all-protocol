@@ -1,6 +1,6 @@
 # 工业协议调试台
 
-Windows 桌面工业协议调试工具。同一个实例可同时打开客户端和服务端。客户端通过 Modbus TCP 访问设备或网关，支持四区读取、HR 和 Coil 写入、定时读取、请求日志及 TX/RX 字节查看。
+Windows 桌面工业协议调试工具。同一个实例可同时打开客户端和服务端。支持 Modbus TCP 和 Siemens S7（ISO-on-TCP），提供点位读写、定时读取、请求日志及 TX/RX 字节查看。两个协议的服务端可同时监听。
 
 ## 获取源码并准备环境
 
@@ -56,15 +56,35 @@ uv run --locked pytest -q
 
 Windows 本地数据保存在 `%LOCALAPPDATA%\AllProtocol`。`connections.json` 保存连接配置，`requests.jsonl` 保存请求结果、错误详情及 TX/RX 报文。请求日志列表显示最近 500 条。追加日志将超过 5 MB（5,242,880 字节）时，清除旧日志并从当前这条重新记录。日志清理独立于连接历史。
 
-## Modbus TCP 服务端
+## 服务端工作台
 
-1. 在首页点击「进入服务端」，新增从站并为 HR、IR、Coil 或 DI 添加点位。偏移从 0 开始。批量添加时按每点占用的寄存器数依次排布，弹窗会显示占用地址。
+从首页进入「服务端」，使用顶部标签选择协议。每个标签独立启动或停止监听，切换标签时已开启的监听和客户端连接继续运行。关闭服务端工作台或首页后，应用会停止全部监听、关闭已接入的客户端连接并释放端口。 [多协议服务端设计](docs/multi-protocol-server-design.md)
+
+### Modbus TCP 服务端
+
+1. 在服务端选择「Modbus TCP」，新增从站并为 HR、IR、Coil 或 DI 添加点位。偏移从 0 开始。批量添加时按每点占用的寄存器数依次排布，弹窗会显示占用地址。
 2. 点击「启动服务」。本机默认监听 `127.0.0.1:1502`。点击「返回首页」再进入客户端，用相同端口、Unit ID、偏移、类型和寄存器顺序访问点位。局域网联调时将监听地址改为本机网卡 IP。
 3. 监听中可在点位表修改当前值来模拟输入。客户端写入 HR 或 Coil 后，当前值会同步刷新。选中请求日志即可查看 RX 和 TX 报文。
 
 「保存方案」将监听参数、从站和点位初始值保存到 `%LOCALAPPDATA%\AllProtocol\modbus-tcp-server.json`。每次启动监听从初始值创建当前值。服务端日志独立保存在 `server-requests.jsonl`，沿用 5 MB 清理和最近 500 条的展示规则。
 
 [服务端设计文档](docs/modbus-tcp-server-design.md) · [角色选择与服务端界面草图](docs/modbus-tcp-server-draft.html)
+
+### Siemens S7 服务端
+
+1. 在服务端选择「Siemens S7」，默认监听 `127.0.0.1:1102`，预置 `DB1.DBW0`（Word，初始值 0）。可添加 DB、M、I、Q 点位及 Bool、Byte、Int、Word、DInt、DWord、Real 类型。
+2. 点击「启动服务」，回到客户端选择「Siemens S7（ISO-on-TCP）」，填入 `127.0.0.1:1102`、Rack 0、Slot 1，再读写 `DB1.DBW0`。第三方客户端可用经典 S7comm 的 Read Var 和 Write Var 访问模拟内存。
+3. 监听时可通过「修改当前值」模拟 PLC 值变化，包括 I 输入区。I 区对网络客户端只读。选中日志可查看对应的 RX / TX 报文。
+
+S7 方案保存在 `%LOCALAPPDATA%\AllProtocol\s7-server.json`，日志保存在 `s7-server-requests.jsonl`。重新启动监听时从方案初始值加载。
+
+## Siemens S7 客户端
+
+1. 进入客户端，选择「Siemens S7（ISO-on-TCP）」。填写 PLC 地址和端口（默认 102），Rack 和 Slot 按实际硬件配置填写。
+2. 连接成功后选择 DB、M、I 或 Q 区，填写从 0 开始的字节偏移。选 DB 区时需填写 DB 号。比如读取 `DB1.DBX2.3`，选择 DB 1、字节偏移 2、Bool、位索引 3。选择 Int、Word、DInt、DWord 或 Real 时，相邻点分别以 2 或 4 字节递增。
+3. 点击「读取」或「轮询」。DB、M、Q 可通过「写入…」输入并确认数值，I 区只读。选中请求日志可查看原始收发帧。写入结果未知时，可重新连接并读取点位核对。
+
+使用经典 S7comm 的 S7-1200/1500 需要按 CPU 设置允许 PUT/GET，并为要访问的 DB 使用标准块访问。 [西门子 PUT/GET 手册](https://docs.tia.siemens.cloud/r/simatic_s7_1200_manual_collection_enus_20/communication/s7-communication/get-and-put-read-and-write-from-a-remote-cpu) · [S7 客户端设计](docs/s7-client-design.md)
 
 ## 开发与许可
 

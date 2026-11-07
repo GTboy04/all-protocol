@@ -3,11 +3,10 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
-from ..application.server_session import ServerSession
-from ..storage import LocalHistory, ServerStorage
+from ..storage import LocalHistory
 from .io_bridge import IoBridge
 from .main_window import MainWindow, _heading, _panel
-from .server_window import ServerWindow
+from .server_workbench import ServerWorkbench
 
 
 class RoleWindow(QWidget):
@@ -39,7 +38,7 @@ class RoleWindow(QWidget):
         cards.setSpacing(14)
         cards.addWidget(self._card("客户端", "本机  ──请求──→  设备", "连接设备，读取或写入点位。",
                                    self._open_client), 1)
-        cards.addWidget(self._card("服务端", "上位机  ──请求──→  本机", "监听连接，模拟多个 Modbus 从站。",
+        cards.addWidget(self._card("服务端", "上位机  ──请求──→  本机", "同时监听 Modbus TCP 和 Siemens S7。",
                                    self._open_server), 1)
         body.addLayout(cards, 1)
         layout.addLayout(body, 1)
@@ -60,24 +59,29 @@ class RoleWindow(QWidget):
         return card
 
     def _open_client(self):
-        self._open("client", IoBridge, lambda bridge: MainWindow(
-            bridge, self._protocols, LocalHistory(self._data_dir), self._return_home))
-
-    def _open_server(self):
-        self._open("server", lambda: IoBridge(ServerSession, ServerSession.stop),
-                   lambda bridge: ServerWindow(bridge, ServerStorage(self._data_dir), self._return_home))
-
-    def _open(self, role, create_bridge, create_window):
-        if role in self._workbenches:
-            workbench, _ = self._workbenches[role]
-        else:
-            bridge = create_bridge()
+        def create():
+            bridge = IoBridge()
             try:
-                workbench = create_window(bridge)
+                return MainWindow(bridge, self._protocols, LocalHistory(self._data_dir), self._return_home), bridge
             except Exception:
                 bridge.join()
                 raise
-            self._workbenches[role] = workbench, bridge
+
+        self._open("client", create)
+
+    def _open_server(self):
+        def create():
+            workbench = ServerWorkbench(self._data_dir, self._return_home)
+            return workbench, workbench
+
+        self._open("server", create)
+
+    def _open(self, role, create):
+        if role in self._workbenches:
+            workbench, _ = self._workbenches[role]
+        else:
+            workbench, owner = create()
+            self._workbenches[role] = workbench, owner
             workbench.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
             workbench.destroyed.connect(lambda: self._workbenches.pop(role))
         self._activate(workbench)
@@ -94,5 +98,15 @@ class RoleWindow(QWidget):
         self._activate(self)
 
     def join(self):
-        for _, bridge in self._workbenches.values():
-            bridge.join()
+        for _, owner in tuple(self._workbenches.values()):
+            owner.join()
+
+    def closeEvent(self, event):
+        server = self._workbenches.get("server")
+        if server is not None and not server[0].request_close(confirm_listeners=False):
+            event.ignore()
+            return
+        client = self._workbenches.get("client")
+        if client is not None:
+            client[0].close()
+        event.accept()

@@ -12,6 +12,9 @@ from .adapters.modbus_tcp.model import Area
 from .adapters.modbus_tcp.server import ServerRequest
 from .adapters.modbus_tcp.server_model import ServerPlan, ServerPoint, Station
 from .adapters.modbus_tcp.values import DataType, RegisterOrder
+from .adapters.s7.model import Area as S7Area, DataType as S7DataType, S7Target
+from .adapters.s7.server import S7ServerRequest
+from .adapters.s7.server_model import S7ServerPlan, S7ServerPoint
 from .application.contracts import ErrorKind, JournalEntry
 
 
@@ -240,4 +243,64 @@ class ServerStorage:
         record = asdict(request)
         record.update(time=request.time.isoformat(), rx=request.rx.hex(), tx=request.tx.hex())
         with _locked(self.directory, "server-journal.lock"):
+            return _append_journal(self.journal_path, record)
+
+
+def _load_s7_server_request(line: bytes) -> S7ServerRequest:
+    data = json.loads(line)
+    if not isinstance(data, dict):
+        raise ValueError("Expected an S7 request record")
+    for field in ("time", "peer", "target", "result", "rx", "tx"):
+        if not isinstance(data[field], str):
+            raise ValueError(f"Invalid request field {field}")
+    if data["function"] is not None and type(data["function"]) is not int:
+        raise ValueError("Invalid S7 function")
+    data["time"] = datetime.fromisoformat(data["time"])
+    data["rx"] = bytes.fromhex(data["rx"])
+    data["tx"] = bytes.fromhex(data["tx"])
+    return S7ServerRequest(**data)
+
+
+class S7ServerStorage:
+    def __init__(self, directory: Path):
+        self.directory = directory
+        self.plan_path = directory / "s7-server.json"
+        self.journal_path = directory / "s7-server-requests.jsonl"
+
+    def load_plan(self) -> S7ServerPlan:
+        try:
+            data = json.loads(self.plan_path.read_bytes())
+        except FileNotFoundError:
+            return S7ServerPlan()
+        if (not isinstance(data, dict) or type(data.get("schema_version")) is not int
+                or data["schema_version"] != 1 or data.get("protocol") != "s7"):
+            raise ValueError("S7 方案版本或协议无法识别")
+        if not isinstance(data["points"], list):
+            raise ValueError("点位必须是列表")
+        points = []
+        for point in data["points"]:
+            target = point["target"]
+            points.append(S7ServerPoint(
+                S7Target(S7Area(target["area"]), target["db"], target["offset"],
+                         S7DataType(target["data_type"]), target["count"], target["bit"]),
+                point["initial"], point["name"],
+            ))
+        plan = S7ServerPlan(data["host"], data["port"], tuple(points))
+        plan.validate()
+        return plan
+
+    def save_plan(self, plan: S7ServerPlan):
+        plan.validate()
+        record = {"schema_version": 1, "protocol": "s7", **asdict(plan)}
+        with _locked(self.directory, "s7-server-plan.lock"):
+            _replace_file(self.plan_path, _json_bytes(record))
+
+    def recent_requests(self) -> tuple[S7ServerRequest, ...]:
+        with _locked(self.directory, "s7-server-journal.lock"):
+            return _read_journal(self.journal_path, _load_s7_server_request)
+
+    def append_request(self, request: S7ServerRequest) -> bool:
+        record = asdict(request)
+        record.update(time=request.time.isoformat(), rx=request.rx.hex(), tx=request.tx.hex())
+        with _locked(self.directory, "s7-server-journal.lock"):
             return _append_journal(self.journal_path, record)

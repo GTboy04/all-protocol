@@ -3,10 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
-from ..adapters.modbus_tcp.model import Area
 from ..adapters.modbus_tcp.server import ServerRequest, TcpServer
-from ..adapters.modbus_tcp.server_model import ServerPlan
-from .contracts import Value
 
 
 class ListenerState(StrEnum):
@@ -23,12 +20,14 @@ class ListenerUpdate:
 
 
 class ServerSession:
-    def __init__(self, emit):
+    def __init__(self, emit, create_server=TcpServer, record_lifecycle=None):
         self.emit = emit
-        self.server: TcpServer | None = None
+        self.server = None
+        self._create_server = create_server
+        self._record_lifecycle = record_lifecycle or self._modbus_lifecycle
         self._lifecycle = asyncio.Lock()
 
-    async def start(self, plan: ServerPlan):
+    async def start(self, plan):
         async with self._lifecycle:
             if self.server is not None:
                 return
@@ -36,17 +35,17 @@ class ServerSession:
             server = None
             try:
                 plan.validate(starting=True)
-                server = TcpServer(plan, self.emit, self.emit)
+                server = self._create_server(plan, self.emit, self.emit)
                 await server.bind()
             except (ValueError, OSError) as error:
                 if server is not None:
                     await server.shutdown()
                 detail = f"启动失败 · {plan.host}:{plan.port} · {error}"
-                self._record(detail)
+                self.emit(self._record_lifecycle(detail))
                 self.emit(ListenerUpdate(ListenerState.STOPPED, detail))
                 return
             self.server = server
-            self._record(f"启动监听 · {plan.host}:{plan.port}")
+            self.emit(self._record_lifecycle(f"启动监听 · {plan.host}:{plan.port}"))
             self.emit(ListenerUpdate(ListenerState.LISTENING))
 
     async def stop(self):
@@ -56,15 +55,16 @@ class ServerSession:
             self.emit(ListenerUpdate(ListenerState.STOPPING))
             await self.server.shutdown()
             self.server = None
-            self._record("已停止监听")
+            self.emit(self._record_lifecycle("已停止监听"))
             self.emit(ListenerUpdate(ListenerState.STOPPED))
 
-    async def set_current(self, unit: int, area: Area, offset: int, value: Value):
+    async def set_current(self, *args):
         if self.server is not None:
             try:
-                self.server.set_current(unit, area, offset, value)
+                self.server.set_current(*args)
             except ValueError as error:
                 self.emit(ListenerUpdate(ListenerState.LISTENING, str(error)))
 
-    def _record(self, result: str):
-        self.emit(ServerRequest(datetime.now(), "", None, None, None, None, result))
+    @staticmethod
+    def _modbus_lifecycle(result: str) -> ServerRequest:
+        return ServerRequest(datetime.now(), "", None, None, None, None, result)

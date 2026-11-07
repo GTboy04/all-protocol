@@ -3,22 +3,14 @@ import re
 from PySide6.QtCore import QSignalBlocker, Signal
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPlainTextEdit, QSpinBox, QVBoxLayout, QWidget,
+    QLineEdit, QPlainTextEdit, QVBoxLayout, QWidget,
 )
 
 from ..adapters.modbus_tcp.model import RULES, Area, ModbusTarget, ModbusTcpConfig, data_types
 from ..adapters.modbus_tcp.values import DataType, RegisterOrder
 from ..application.contracts import ClientError, Target, Value
 from ..storage import ProfileFields
-from .widgets import add_field
-
-
-def spinbox(minimum, maximum, value):
-    box = QSpinBox()
-    box.setRange(minimum, maximum)
-    box.setValue(value)
-    box.setKeyboardTracking(False)
-    return box
+from .widgets import add_field, spinbox
 
 
 def order_picker(selected=RegisterOrder.BIG):

@@ -57,6 +57,7 @@ class Session:
         self._update(connection=ConnectionState.CONNECTING, endpoint=endpoint)
         start = monotonic()
         request_id = next(self._ids)
+        packets = self._packets = []
         try:
             events = ClientEvents(self._packet, lambda: self._lost(generation))
             self._client = protocol.create_client(config, events)
@@ -67,13 +68,14 @@ class Session:
             failure = self._failure(error)
             await self._close_client()
             self._entry(request_id, "连接", endpoint, start, failure.kind,
-                        error=failure.kind, detail=self._detail(failure))
+                        error=failure.kind, detail=self._detail(failure), packets=tuple(packets))
             self._update(connection=ConnectionState.OFFLINE, endpoint="")
             self._closed.set()
         else:
-            self._entry(request_id, "连接", endpoint, start, "已连接")
+            self._entry(request_id, "连接", endpoint, start, "已连接", packets=tuple(packets))
             self._update(connection=ConnectionState.ONLINE)
         finally:
+            self._packets = None
             self._task = None
 
     def _packet(self, sending: bool, data: bytes):

@@ -30,6 +30,25 @@ QLabel#connectionStatus[tone="pending"] {
     color: #ffe6ba;
     border-color: #896b3d;
 }
+QTabWidget#serverProtocols::pane { border: 0; border-top: 1px solid #d4dfe8; }
+QTabWidget#serverProtocols::tab-bar { left: 16px; }
+QTabBar#serverProtocolTabs::tab {
+    background: #e5edf4;
+    border: 1px solid #d4dfe8;
+    border-bottom: 3px solid transparent;
+    margin: 6px 4px 0 0;
+    padding: 8px 14px 6px;
+    font-weight: bold;
+}
+QTabBar#serverProtocolTabs::tab:selected { background: #ffffff; border-bottom-color: #0f6570; }
+QTabBar#serverProtocolTabs::tab:focus { border-color: #0f6570; }
+QLabel#listenerStatus { background: #edf2f6; color: #405970; padding: 6px 9px; font-weight: bold; }
+QLabel#listenerStatus[tone="online"] { background: #e2f4ec; color: #154c47; }
+QLabel#listenerStatus[tone="pending"] { background: #fff3d9; color: #684c24; }
+QListWidget#serverStations { background: #ffffff; border: 1px solid #d4dfe8; outline: 0; }
+QListWidget#serverStations:focus { border-color: #0f6570; }
+QListWidget#serverStations::item { padding: 5px 7px; }
+QListWidget#serverStations::item:selected { background: #d2e9ed; color: #123b48; }
 QFrame#panel { background: #ffffff; border: 1px solid #d4dfe8; border-radius: 7px; }
 QLabel#sectionTitle { font-size: 15px; font-weight: bold; }
 QLabel#fieldLabel { color: #405970; }
