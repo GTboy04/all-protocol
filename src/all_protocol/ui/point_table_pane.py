@@ -1,13 +1,14 @@
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QSignalBlocker, Qt
+from PySide6.QtCore import QSignalBlocker, Qt, QTimer
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
     QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
 )
 
 from ..application.contracts import ClientError, ConnectionState, SessionState, TableReadUpdate
+from ..application.sampling import Quality, SampleStore
 from ..point_tables import (
     IMPORT_LIMIT_BYTES, PointDefinition, PointTable, export_points_csv, export_table_json,
     import_points_csv, import_table_json, new_id, target_record,
@@ -140,16 +141,19 @@ class CsvEditDialog(QDialog):
 
 
 class PointTablePane(QWidget):
-    def __init__(self, workspace, device, create_form, save_device, read_table, write_point, can_write):
+    def __init__(self, workspace, device, create_form, save_device, read_table, write_point, can_write,
+                 poll_table, stop_all):
         super().__init__()
         self.workspace, self.device, self.create_form = workspace, device, create_form
         self.save_device, self.read_table, self.write_point = save_device, read_table, write_point
         self.can_write = can_write
+        self.poll_table, self.stop_all = poll_table, stop_all
         self.state = SessionState()
         self._context = None
         self._tables = ()
-        self._samples = {}
-        self._stale = set()
+        self.samples = SampleStore()
+        self._definitions = None
+        self._dirty = set()
         self._pending = set()
         layout = QVBoxLayout(self)
         self.context = QLabel()
@@ -168,6 +172,26 @@ class PointTablePane(QWidget):
                             ("删除点表", self._delete), ("导入…", self._import), ("导出 JSON…", self._export)):
             self._button(toolbar, label, slot)
         layout.addLayout(toolbar)
+        polling = QHBoxLayout()
+        self.poll_interval = spinbox(200, 30000, 1000)
+        self.poll_interval.setSuffix(" ms")
+        self.stale_after = spinbox(200, 3600000, 3000)
+        self.stale_after.setSuffix(" ms")
+        for label, field in (("本表周期", self.poll_interval), ("过期时间", self.stale_after)):
+            text = QLabel(label)
+            text.setBuddy(field)
+            polling.addWidget(text)
+            polling.addWidget(field)
+        self.poll_button = QPushButton("启动本表轮询")
+        self.poll_button.clicked.connect(self._toggle_poll)
+        polling.addWidget(self.poll_button)
+        self.stop_all_button = QPushButton("停止全部轮询")
+        self.stop_all_button.clicked.connect(self.stop_all)
+        polling.addWidget(self.stop_all_button)
+        polling.addStretch()
+        self.schedule_status = QLabel()
+        polling.addWidget(self.schedule_status)
+        layout.addLayout(polling)
         toolbar = QHBoxLayout()
         for label, slot in (("新增点位", self._add_point), ("编辑点位", self._edit_point),
                             ("删除点位", self._delete_point), ("批量编辑…", self._bulk_edit)):
@@ -176,7 +200,7 @@ class PointTablePane(QWidget):
         self._button(toolbar, "读取整表", self._read).setObjectName("primary")
         self._button(toolbar, "写入原始值…", self._write).setObjectName("write")
         layout.addLayout(toolbar)
-        self.rows = Rows(("名称", "地址 / 类型", "原始值", "工程值", "单位", "更新时间", "结果", "说明"), self._row, (2, 3))
+        self.rows = Rows(("名称", "地址 / 类型", "原始值", "工程值", "单位", "最后采样", "质量", "最后成功", "说明"), self._row, (2, 3))
         self.rows.setParent(self)
         self.point_table = _table(self.rows)
         self.point_table.setAccessibleName("命名点位")
@@ -187,7 +211,7 @@ class PointTablePane(QWidget):
         self.feedback.setWordWrap(True)
         layout.addWidget(self.feedback)
         footer = QHBoxLayout()
-        hint = QLabel("工程值 = 原始值 × 倍率 + 偏置；当前仅单次读取，写入使用原始值。")
+        hint = QLabel("工程值 = 原始值 × 倍率 + 偏置；可按表独立轮询，写入使用原始值。")
         hint.setWordWrap(True)
         footer.addWidget(hint, 1)
         self.save_device_button = QPushButton("保存设备配置")
@@ -197,6 +221,12 @@ class PointTablePane(QWidget):
         self.tables.currentIndexChanged.connect(self._show_points)
         self.point_table.selectionModel().currentRowChanged.connect(lambda *_: self._buttons())
         self.point_table.doubleClicked.connect(lambda *_: self._edit_point())
+        self.poll_interval.valueChanged.connect(self._settings_changed)
+        self.stale_after.valueChanged.connect(self._settings_changed)
+        self._paint_timer = QTimer(self)
+        self._paint_timer.setInterval(50)
+        self._paint_timer.timeout.connect(self._flush_values)
+        self._paint_timer.start()
 
     def _button(self, layout, name, slot):
         button = QPushButton(name)
@@ -217,28 +247,33 @@ class PointTablePane(QWidget):
 
     def _row(self, point):
         table = self.table
-        sample = self._samples.get((table.id, point.id)) if table else None
-        if sample is not None and sample[0] != point.target:
-            sample = None
-        raw, engineering, time, outcome = "—", "—", "—", "未读取"
+        sample = self.samples.samples.get((table.id, point.id)) if table else None
+        raw, engineering, time, success, outcome = "—", "—", "—", "—", Quality.NEVER.value
         if sample:
-            _, value, time, outcome = sample
+            value, outcome = sample.raw_value, sample.quality.value
+            time = sample.sampled_at.strftime("%H:%M:%S") if sample.sampled_at else "—"
+            success = sample.last_success_at.strftime("%H:%M:%S") if sample.last_success_at else "—"
             if value is not None:
                 raw = str(value)
                 try:
                     engineering = point.engineering_text(value)
                 except ValueError as error:
                     outcome = str(error)
-                if self.state.connection != ConnectionState.ONLINE or (table.id, point.id) in self._stale:
+                if sample.quality != Quality.GOOD:
                     outcome += " · 旧数据"
         if table and (table.id, point.id) in self._pending:
             outcome = "等待读取"
-        return point.name, point.target.label, raw, engineering, point.unit, time, outcome, point.description
+        return point.name, point.target.label, raw, engineering, point.unit, time, outcome, success, point.description
 
     def refresh(self, state, closing=False):
         self.state, self.closing = state, closing
+        definitions = self.workspace.project.point_tables
+        if definitions is not self._definitions:
+            self._dirty.update(self.samples.sync(definitions))
+            self._definitions = definitions
+        self._dirty.update(self.samples.set_generation(state.generation))
         if state.connection != ConnectionState.ONLINE:
-            self._stale.update(self._samples)
+            self._dirty.update(self.samples.disconnect())
         device = self.device()
         self._context = device
         tables = tuple(table for table in self.workspace.project.point_tables if device and table.device_id == device.id)
@@ -257,31 +292,49 @@ class PointTablePane(QWidget):
             text = "先填写设备连接参数，再保存设备配置并新建点表。"
         self.context.setText(text)
         self.save_device_button.setVisible(device is None)
-        if not state.busy:
-            self._pending.clear()
-        self._show_points(keep_selection=True)
+        pending = {key for key in self._pending if key[0] in state.manual_tables}
+        self._dirty.update(self._pending - pending)
+        self._pending = pending
+        groups = len(state.polling_groups) + int(state.polling)
+        full = " · 队列已满" if state.queued >= state.queue_capacity else ""
+        self.schedule_status.setText(f"轮询 {groups} 组 · 手动任务 {state.queued}/{state.queue_capacity}{full}")
         self._buttons()
 
     def _buttons(self):
-        editable = self._context is not None and not self.state.busy and not getattr(self, "closing", False)
         table, point = self.table, self.point
+        available = self._context is not None and not getattr(self, "closing", False)
+        active = table is not None and table.id in self.state.polling_groups
+        editable = available and not active and (table is None or table.id not in self.state.manual_tables)
         for name, button in self.actions.items():
             button.setEnabled(editable and (name in ("新建点表", "导入…") or table is not None))
         for name in ("编辑点位", "删除点位"):
             self.actions[name].setEnabled(editable and point is not None)
-        idle = editable and self.state.connection == ConnectionState.ONLINE
+        idle = available and self.state.connection == ConnectionState.ONLINE and self.state.queued < self.state.queue_capacity
         self.actions["读取整表"].setEnabled(idle and table is not None and bool(table.points))
         writable = point is not None and getattr(point.target, "writable", True)
         if point is not None and hasattr(point.target, "area") and target_record(point.target)["area"] in ("IR", "DI"):
             writable = False
         self.actions["写入原始值…"].setEnabled(idle and writable and self.can_write())
-        self.tables.setEnabled(not self.state.busy and not getattr(self, "closing", False))
-        self.save_device_button.setEnabled(not self.state.busy and not getattr(self, "closing", False))
+        for name in ("读取整表", "写入原始值…"):
+            self.actions[name].setToolTip("手动任务队列已满，请等待任务完成" if self.state.queued >= self.state.queue_capacity else "")
+        self.tables.setEnabled(not getattr(self, "closing", False))
+        self.save_device_button.setEnabled(not getattr(self, "closing", False))
+        self.poll_interval.setEnabled(editable and table is not None)
+        self.stale_after.setEnabled(editable and table is not None)
+        self.poll_button.setText("停止本表轮询" if active else "启动本表轮询")
+        self.poll_button.setEnabled(available and self.state.connection == ConnectionState.ONLINE and table is not None
+                                    and bool(table.points) and table.id not in self.state.manual_tables)
+        self.stop_all_button.setEnabled(self.state.connection == ConnectionState.ONLINE
+                                        and (self.state.polling or bool(self.state.polling_groups)))
 
     def _show_points(self, *_args, keep_selection=False):
         selected = self.point.id if keep_selection and self.point else None
         points = self.table.points if self.table else ()
         self.rows.reset(points)
+        if self.table:
+            with QSignalBlocker(self.poll_interval), QSignalBlocker(self.stale_after):
+                self.poll_interval.setValue(self.table.interval_ms)
+                self.stale_after.setValue(self.table.stale_after_ms)
         if selected:
             index = next((index for index, point in enumerate(points) if point.id == selected), None)
             if index is not None:
@@ -290,11 +343,6 @@ class PointTablePane(QWidget):
 
     def _apply(self, table):
         self.workspace.project = self.workspace.project.with_table(table)
-        targets = {point.id: point.target for point in table.points}
-        for key, sample in tuple(self._samples.items()):
-            if key[0] == table.id and sample[0] != targets.get(key[1]):
-                del self._samples[key]
-                self._stale.discard(key)
         self.feedback.clear()
         self.refresh(self.state)
         self.tables.setCurrentIndex(self.tables.findData(table.id))
@@ -327,15 +375,13 @@ class PointTablePane(QWidget):
                                                QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
             table_id = self.table.id
             self.workspace.project = self.workspace.project.without_table(table_id)
-            self._samples = {key: sample for key, sample in self._samples.items() if key[0] != table_id}
-            self._stale = {key for key in self._stale if key[0] != table_id}
             self.refresh(self.state)
 
     def _add_point(self):
         self._edit_definition(None)
 
     def _edit_point(self):
-        if self.point and not self.state.busy:
+        if self.point and self.actions["编辑点位"].isEnabled():
             self._edit_definition(self.point)
 
     def _edit_definition(self, original):
@@ -411,8 +457,6 @@ class PointTablePane(QWidget):
     def _read(self):
         if self.table and self.actions["读取整表"].isEnabled():
             self._pending = {(self.table.id, point.id) for point in self.table.points}
-            for key in self._pending:
-                self._samples.pop(key, None)
             self.read_table(self.table)
 
     def _write(self):
@@ -420,13 +464,25 @@ class PointTablePane(QWidget):
             self.write_point(self.point.target)
 
     def handle_read(self, event: TableReadUpdate):
-        table = next((table for table in self.workspace.project.point_tables if table.id == event.table_id), None)
-        point = next((point for point in table.points if point.id == event.point_id), None) if table else None
-        if point is None or point.target != event.update.command.target:
-            return
-        update = event.update
-        value = update.points[0].value if update.points and len(update.points) == 1 else None
-        outcome = update.entry.outcome if update.entry.error else ("成功" if value is not None else "响应点数无效")
-        self._samples[event.table_id, event.point_id] = point.target, value, update.entry.time.strftime("%H:%M:%S"), outcome
-        self._stale.discard((event.table_id, event.point_id))
+        self._dirty.update(self.samples.update(event))
         self._pending.discard((event.table_id, event.point_id))
+
+    def _settings_changed(self):
+        if self.table and self.poll_interval.isEnabled():
+            self._apply(replace(self.table, interval_ms=self.poll_interval.value(), stale_after_ms=self.stale_after.value()))
+
+    def _toggle_poll(self):
+        if self.table:
+            self.poll_table(self.table, self.table.id not in self.state.polling_groups)
+
+    def _flush_values(self):
+        self._dirty.update(self.samples.expire())
+        if self.table:
+            indices = [index for index, point in enumerate(self.rows.items) if (self.table.id, point.id) in self._dirty]
+            # Emit contiguous ranges without resetting the model or selection.
+            while indices:
+                start = end = indices.pop(0)
+                while indices and indices[0] == end + 1:
+                    end = indices.pop(0)
+                self.rows.dataChanged.emit(self.rows.index(start, 0), self.rows.index(end, len(self.rows.headers) - 1))
+        self._dirty.clear()

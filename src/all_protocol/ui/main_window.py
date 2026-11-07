@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..application.contracts import (
-    ClientError, Command, ConnectionState, JournalEntry, Point, ProtocolRegistration,
+    ClientError, Command, ConnectionState, JournalEntry, OperationRejected, Point, ProtocolRegistration,
     ReadUpdate, SessionState, TableReadUpdate, Target, Value,
 )
 from ..storage import ConnectionProfile, LocalHistory, ProfileFields, VISIBLE_LOG_ROWS
@@ -185,7 +185,7 @@ class MainWindow(QMainWindow):
         self.interval.setRange(200, 30000)
         self.interval.setValue(1000)
         self.interval.setSuffix(" ms")
-        self.interval.setToolTip("两次读取之间的等待时间")
+        self.interval.setToolTip("目标触发周期；慢响应不补发遗漏周期")
         self.interval.valueChanged.connect(self._interval_changed)
         self.result_context = QLabel()
         self.result_context.setObjectName("resultContext")
@@ -328,6 +328,7 @@ class MainWindow(QMainWindow):
                 self._history.workspace, self._table_device,
                 lambda: self._protocols[self.protocol.currentIndex()].create_form,
                 self._save_table_device, self._read_table, self._write_point, lambda: self._registration.writable,
+                self._poll_table, self._stop_all_polling,
             )
             self.point_views = QTabWidget()
             self.point_views.setAccessibleName("点位视图")
@@ -499,7 +500,7 @@ class MainWindow(QMainWindow):
                 self._refresh()
                 return
             self._query_changed()
-            self._state = SessionState(ConnectionState.CONNECTING, endpoint)
+            self._state = replace(self._state, connection=ConnectionState.CONNECTING, endpoint=endpoint)
             self._remember_connection(endpoint)
             self._bridge.submit(self._bridge.session.connect(self._registration, config, endpoint))
         self._refresh()
@@ -511,7 +512,7 @@ class MainWindow(QMainWindow):
         target = self._form.target()
         state = self._state
         values = self._form.confirm_write(self, state.endpoint, target)
-        if values is not None and self._state == state and not self._closing:
+        if values is not None and self._same_connection(state):
             self._execute(Command(target, values))
 
     def _table_device(self):
@@ -534,28 +535,46 @@ class MainWindow(QMainWindow):
 
     def _read_table(self, table):
         device = self._table_device()
-        if (device is None or device.id != table.device_id or self._state.busy
+        if (device is None or device.id != table.device_id
                 or self._state.connection != ConnectionState.ONLINE):
             return
-        self._state = replace(self._state, busy=True)
+        self._state = replace(self._state, busy=True, queued=self._state.queued + 1,
+                              manual_tables=tuple(set(self._state.manual_tables) | {table.id}))
         self._refresh()
         commands = tuple((point.id, Command(point.target)) for point in table.points)
         self._bridge.submit(self._bridge.session.execute_table(table.id, commands))
 
     def _write_point(self, target):
         state = self._state
-        if state.connection != ConnectionState.ONLINE or state.busy or not self._registration.writable:
+        if state.connection != ConnectionState.ONLINE or not self._registration.writable:
             return
         values = self._form.confirm_write(self, state.endpoint, target)
-        if values is not None and self._state == state and not self._closing:
+        if values is not None and self._same_connection(state):
             self._execute(Command(target, values))
 
     def _execute(self, command: Command, interval_ms: int | None = None):
         self.feedback.clear()
         self._remember_connection(self._state.endpoint)
-        self._state = replace(self._state, busy=True, polling=interval_ms is not None)
+        self._state = replace(self._state, busy=True, queued=self._state.queued + int(interval_ms is None),
+                              polling=self._state.polling or interval_ms is not None)
         self._refresh()
         self._bridge.submit(self._bridge.session.execute(command, interval_ms))
+
+    def _same_connection(self, state):
+        return (self._state.connection == ConnectionState.ONLINE and self._state.generation == state.generation
+                and self._state.endpoint == state.endpoint and not self._closing)
+
+    def _poll_table(self, table, start):
+        if start:
+            self._state = replace(self._state, polling_groups=self._state.polling_groups + (table.id,))
+            commands = tuple((point.id, Command(point.target)) for point in table.points)
+            self._bridge.submit(self._bridge.session.start_table_polling(table.id, commands, table.interval_ms))
+        else:
+            self._bridge.submit(self._bridge.session.stop_table_polling(table.id))
+        self._refresh()
+
+    def _stop_all_polling(self):
+        self._bridge.submit(self._bridge.session.stop_all_polling())
 
     def _toggle_poll(self):
         if self._state.polling:
@@ -567,6 +586,8 @@ class MainWindow(QMainWindow):
 
     def _handle_event(self, event):
         if isinstance(event, SessionState):
+            if event.generation < self._state.generation:
+                return
             self._state = event
             if not event.polling:
                 self._stopping_poll = False
@@ -581,7 +602,7 @@ class MainWindow(QMainWindow):
             self.journal.prepend(event)
             if event.error or event.operation == "写入":
                 self.feedback.setText(f"{event.outcome} · {event.detail}" if event.detail else event.outcome)
-        elif isinstance(event, ReadUpdate) and event.command.target == self._form.target():
+        elif isinstance(event, ReadUpdate) and event.generation == self._state.generation and event.command.target == self._form.target():
             if event.points is not None:
                 self._last_read = event
                 self.results.reset(event.points)
@@ -589,6 +610,11 @@ class MainWindow(QMainWindow):
                 self._last_read = replace(self._last_read, points=None)
         elif isinstance(event, TableReadUpdate) and self.point_table_pane is not None:
             self.point_table_pane.handle_read(event)
+        elif isinstance(event, OperationRejected) and event.generation == self._state.generation:
+            self.feedback.setText(f"{event.operation}未执行 · {event.detail}")
+            self.statusBar().showMessage(self.feedback.text(), 10000)
+            if self.point_table_pane is not None:
+                self.point_table_pane.feedback.setText(self.feedback.text())
         self._refresh()
 
     def _show_detail(self, index, _previous):
@@ -601,6 +627,8 @@ class MainWindow(QMainWindow):
         context = (entry.time.strftime("%Y-%m-%d %H:%M:%S"), protocol, entry.endpoint)
         lines = ["  ".join(filter(None, context)),
                  f"#{entry.request_id}  {entry.operation}  {entry.target}  {entry.outcome}"]
+        if entry.operation_id is not None:
+            lines.append(f"任务 #{entry.operation_id}")
         if entry.detail:
             lines.append(entry.detail)
         for sending, data in entry.packets:
@@ -611,7 +639,7 @@ class MainWindow(QMainWindow):
         state = self._state
         online = state.connection == ConnectionState.ONLINE
         offline = state.connection == ConnectionState.OFFLINE
-        idle = online and not state.busy and not self._closing
+        idle = online and state.queued < state.queue_capacity and not self._closing
         self.connection_status.setText(
             f"{state.connection} · {state.endpoint}" if state.endpoint else state.connection
         )
@@ -640,7 +668,7 @@ class MainWindow(QMainWindow):
         else:
             entry = self._last_read.entry
             text = f"{entry.target} · {entry.time:%H:%M:%S}"
-            if self._last_read.points is None or not online:
+            if self._last_read.points is None or not online or self._last_read.generation != state.generation:
                 text += " · 旧数据"
         self.result_context.setText(text)
         if self.point_table_pane is not None:

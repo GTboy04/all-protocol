@@ -91,7 +91,7 @@ def project_record(project: Project) -> dict:
     s7 = {"schema_version": 1, "protocol": "s7", **asdict(project.s7)}
     s7["points"] = [asdict(point) for point in project.s7.points]
     return {
-        "format": "all-protocol-project", "schema_version": 2, "name": project.name,
+        "format": "all-protocol-project", "schema_version": 3, "name": project.name,
         "devices": [asdict(item) for item in project.devices],
         "servers": {"modbus-tcp": modbus, "s7": s7},
         "point_tables": [table_record(table) for table in project.point_tables],
@@ -101,7 +101,7 @@ def project_record(project: Project) -> dict:
 def decode_project(data) -> Project:
     try:
         if (not isinstance(data, dict) or data.get("format") != "all-protocol-project"
-                or type(data.get("schema_version")) is not int or data["schema_version"] not in (1, 2)):
+                or type(data.get("schema_version")) is not int or data["schema_version"] not in (1, 2, 3)):
             raise ValueError("项目格式或版本无法识别")
         name = data["name"]
         if not isinstance(name, str) or not name.strip() or len(name) > 200:
@@ -148,6 +148,8 @@ def decode_project(data) -> Project:
         for index, raw_table in enumerate(raw_tables):
             try:
                 device = devices_by_id[raw_table["device_id"]]
+                if data["schema_version"] == 3 and not {"interval_ms", "stale_after_ms"}.issubset(raw_table):
+                    raise ValueError("v3 点表缺少轮询周期或过期时间")
                 table = decode_table(raw_table, device.profile.protocol)
                 if table.id in table_ids or any(point.id in point_ids for point in table.points):
                     raise ValueError("点表或点位 ID 重复")

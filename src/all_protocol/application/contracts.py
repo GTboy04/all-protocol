@@ -62,6 +62,11 @@ class SessionState:
     endpoint: str = ""
     busy: bool = False
     polling: bool = False
+    generation: int = 0
+    queued: int = 0
+    queue_capacity: int = 32
+    polling_groups: tuple[str, ...] = ()
+    manual_tables: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +83,7 @@ class JournalEntry:
     packets: tuple[tuple[bool, bytes], ...] = ()
     protocol: str = ""
     endpoint: str = ""
+    operation_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +91,7 @@ class ReadUpdate:
     command: Command
     entry: JournalEntry
     points: tuple[Point, ...] | None
+    generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +99,14 @@ class TableReadUpdate:
     table_id: str
     point_id: str
     update: ReadUpdate
+
+
+@dataclass(frozen=True, slots=True)
+class OperationRejected:
+    operation: str
+    detail: str
+    generation: int
+    table_id: str = ""
 
 
 class Client(Protocol):

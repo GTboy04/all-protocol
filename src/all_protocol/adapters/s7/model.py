@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import IntEnum, StrEnum
 import math
 import struct
@@ -88,6 +88,18 @@ class S7Target:
     data_type: DataType
     count: int = 1
     bit: int = 0
+
+    def merged_with(self, other):
+        if (not isinstance(other, S7Target) or other.count != 1 or self.area != other.area or self.db != other.db
+                or self.data_type != other.data_type or self.data_type == DataType.BOOL
+                or self.offset + self.byte_count != other.offset):
+            return None
+        merged = replace(self, count=self.count + 1)
+        try:
+            merged.validate()
+        except ClientError:
+            return None
+        return merged
 
     @property
     def byte_count(self) -> int:

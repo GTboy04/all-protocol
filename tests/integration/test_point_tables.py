@@ -90,7 +90,7 @@ def test_target_decoder_rejects_wrong_protocol_address_and_count():
         import_table_json(export_table_json(example("modbus-tcp"), "modbus-tcp"), "s7", "device")
 
 
-def test_project_v1_migrates_in_memory_and_writes_v2_on_save(tmp_path):
+def test_project_v1_migrates_in_memory_and_writes_current_version_on_save(tmp_path):
     original = Project("旧项目").remember(profile("modbus-tcp"))
     record = project_record(original)
     record["schema_version"] = 1
@@ -105,7 +105,7 @@ def test_project_v1_migrates_in_memory_and_writes_v2_on_save(tmp_path):
     table = replace(example("modbus-tcp"), device_id=migrated.devices[0].id)
     project = migrated.with_table(table)
     file.save(project, path)
-    assert json.loads(path.read_bytes())["schema_version"] == 2
+    assert json.loads(path.read_bytes())["schema_version"] == 3
     assert ProjectFile().open(path) == project
 
 
@@ -138,3 +138,43 @@ def test_device_removal_cascades_point_tables_but_keeps_other_devices(tmp_path):
     history.forget(profile("s7"))
     assert len(workspace.project.devices) == len(workspace.project.point_tables) == 1
     assert workspace.project.point_tables[0].device_id == workspace.project.devices[0].id
+
+
+def test_v2_project_migrates_poll_settings_without_touching_source_until_save(tmp_path):
+    project = Project("旧点表").remember(profile("modbus-tcp"))
+    table = replace(example("modbus-tcp"), device_id=project.devices[0].id)
+    record = project_record(project.with_table(table))
+    record["schema_version"] = 2
+    for item in record["point_tables"]:
+        item.pop("interval_ms")
+        item.pop("stale_after_ms")
+    path = tmp_path / "v2.json"
+    original = json.dumps(record).encode()
+    path.write_bytes(original)
+    file = ProjectFile()
+    migrated = file.open(path)
+    assert path.read_bytes() == original
+    assert migrated.point_tables[0].interval_ms == 1000 and migrated.point_tables[0].stale_after_ms == 3000
+    changed = migrated.with_table(replace(migrated.point_tables[0], interval_ms=250, stale_after_ms=1500))
+    file.save(changed, path)
+    assert json.loads(path.read_bytes())["schema_version"] == 3
+    assert ProjectFile().open(path) == changed
+
+
+@pytest.mark.parametrize("changes", ({"interval_ms": True}, {"interval_ms": 199}, {"interval_ms": 30001},
+                                     {"stale_after_ms": False}, {"stale_after_ms": 199}, {"stale_after_ms": 3600001}))
+def test_invalid_poll_configuration(changes):
+    with pytest.raises(ValueError):
+        replace(example("modbus-tcp"), **changes).validate("modbus-tcp")
+
+
+def test_old_table_json_gets_default_poll_settings_and_new_json_requires_them():
+    table = example("modbus-tcp")
+    record = json.loads(export_table_json(table, "modbus-tcp"))
+    record["table"].pop("interval_ms")
+    with pytest.raises(ValueError, match="缺少"):
+        import_table_json(json.dumps(record), "modbus-tcp", "device")
+    record["schema_version"] = 1
+    record["table"].pop("stale_after_ms")
+    imported = import_table_json(json.dumps(record), "modbus-tcp", "device")
+    assert imported.interval_ms == 1000 and imported.stale_after_ms == 3000

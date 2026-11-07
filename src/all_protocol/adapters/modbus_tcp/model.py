@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from ...application.contracts import ClientError, ErrorKind, Target, Value
@@ -61,6 +61,18 @@ class ModbusTarget:
     count: int
     data_type: DataType | None = None
     order: RegisterOrder = RegisterOrder.BIG
+
+    def merged_with(self, other):
+        if (not isinstance(other, ModbusTarget) or other.count != 1 or self.unit_id != other.unit_id
+                or self.area != other.area or self.value_type != other.value_type or self.order != other.order
+                or self.offset + self.register_count != other.offset):
+            return None
+        merged = replace(self, count=self.count + 1)
+        try:
+            merged.validate()
+        except ClientError:
+            return None
+        return merged
 
     @property
     def value_type(self) -> DataType:

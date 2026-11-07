@@ -124,8 +124,14 @@ class PointTable:
     device_id: str
     name: str
     points: tuple[PointDefinition, ...] = ()
+    interval_ms: int = 1000
+    stale_after_ms: int = 3000
 
     def validate(self, protocol: str):
+        if type(self.interval_ms) is not int or not 200 <= self.interval_ms <= 30000:
+            raise ValueError("轮询周期必须为 200–30000 ms")
+        if type(self.stale_after_ms) is not int or not 200 <= self.stale_after_ms <= 3600000:
+            raise ValueError("过期时间必须为 200–3600000 ms")
         for value, label in ((self.id, "点表 ID"), (self.device_id, "设备 ID"), (self.name, "点表名称")):
             _text(value, label, required=True)
         ids = set()
@@ -140,7 +146,7 @@ class PointTable:
 
     def duplicate(self, name: str, *, device_id: str | None = None) -> "PointTable":
         return PointTable(new_id(), device_id or self.device_id, name,
-                          tuple(replace(point, id=new_id()) for point in self.points))
+                          tuple(replace(point, id=new_id()) for point in self.points), self.interval_ms, self.stale_after_ms)
 
 
 def point_record(point: PointDefinition) -> dict:
@@ -150,7 +156,8 @@ def point_record(point: PointDefinition) -> dict:
 
 def table_record(table: PointTable) -> dict:
     return {"id": table.id, "device_id": table.device_id, "name": table.name,
-            "points": [point_record(point) for point in table.points]}
+            "points": [point_record(point) for point in table.points],
+            "interval_ms": table.interval_ms, "stale_after_ms": table.stale_after_ms}
 
 
 def decode_table(data, protocol: str) -> PointTable:
@@ -167,7 +174,8 @@ def decode_table(data, protocol: str) -> PointTable:
                                                item.get("description", ""), item.get("precision", 3)))
             except (KeyError, TypeError, ValueError) as error:
                 raise ValueError(f"points[{index}]：{error}") from error
-        table = PointTable(data["id"], data["device_id"], data["name"], tuple(points))
+        table = PointTable(data["id"], data["device_id"], data["name"], tuple(points),
+                           data.get("interval_ms", 1000), data.get("stale_after_ms", 3000))
         table.validate(protocol)
         return table
     except (KeyError, TypeError) as error:
@@ -176,7 +184,7 @@ def decode_table(data, protocol: str) -> PointTable:
 
 def export_table_json(table: PointTable, protocol: str) -> str:
     table.validate(protocol)
-    record = {"format": "all-protocol-point-table", "schema_version": 1, "protocol": protocol,
+    record = {"format": "all-protocol-point-table", "schema_version": 2, "protocol": protocol,
               "table": table_record(table)}
     return json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
 
@@ -188,10 +196,12 @@ def import_table_json(contents: str, protocol: str, device_id: str) -> PointTabl
     try:
         data = json.loads(contents, parse_constant=reject)
         if (not isinstance(data, dict) or data.get("format") != "all-protocol-point-table"
-                or type(data.get("schema_version")) is not int or data["schema_version"] != 1):
+                or type(data.get("schema_version")) is not int or data["schema_version"] not in (1, 2)):
             raise ValueError("无法识别点表格式或版本")
         if data["protocol"] != protocol:
             raise ValueError("导入点表的协议与当前设备不同")
+        if data["schema_version"] == 2 and not {"interval_ms", "stale_after_ms"}.issubset(data["table"]):
+            raise ValueError("v2 点表缺少轮询周期或过期时间")
         return decode_table(data["table"], protocol).duplicate(data["table"]["name"], device_id=device_id)
     except (KeyError, TypeError, RecursionError) as error:
         raise ValueError(f"点表文件无效：{error}") from error

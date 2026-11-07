@@ -130,3 +130,39 @@ def test_scalar_response_count_errors_are_logged_and_writes_are_rejected(count):
         finally:
             await session.disconnect()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("protocol", ("modbus-tcp", "s7"))
+def test_continuous_points_share_one_real_request_and_keep_individual_identity(protocol):
+    async def run():
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        if protocol == "modbus-tcp":
+            targets = (ModbusTarget(1, Area.HR, 0, 1), ModbusTarget(1, Area.HR, 1, 1))
+            plan = ServerPlan(port=port, stations=(Station(1, "", (ServerPoint(Area.HR, 0, 235), ServerPoint(Area.HR, 1, 125))),))
+            server = TcpServer(plan, lambda *_: None, lambda *_: None)
+            config = ModbusTcpConfig("127.0.0.1", port)
+            registration = ProtocolRegistration(protocol, protocol, ModbusTcpClient)
+        else:
+            targets = (S7Target(S7Area.DB, 1, 0, S7Type.WORD), S7Target(S7Area.DB, 1, 2, S7Type.WORD))
+            plan = S7ServerPlan(port=port, points=(S7ServerPoint(targets[0], 235), S7ServerPoint(targets[1], 125)))
+            server = S7Server(plan, lambda *_: None, lambda *_: None)
+            config = S7Config("127.0.0.1", port)
+            registration = ProtocolRegistration(protocol, protocol, S7Client)
+        events = []
+        session = Session(events.append)
+        try:
+            await server.bind()
+            await session.connect(registration, config, config.endpoint)
+            await session.execute_table("t", tuple((str(index), Command(target)) for index, target in enumerate(targets)))
+            updates = [event for event in events if isinstance(event, TableReadUpdate)]
+            assert [event.update.points[0].value for event in updates] == [235, 125]
+            assert [event.update.command.target for event in updates] == list(targets)
+            assert updates[0].update.entry is updates[1].update.entry
+            assert updates[0].update.entry.operation_id is not None
+            assert len(updates[0].update.entry.packets) == 2
+        finally:
+            await session.disconnect()
+            await server.shutdown()
+    asyncio.run(run())

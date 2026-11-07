@@ -71,6 +71,8 @@ def _load_entry(line: bytes) -> JournalEntry:
             raise ValueError(f"Invalid journal field {field}")
     if type(data["request_id"]) is not int or type(data["elapsed_ms"]) is not int:
         raise ValueError("Invalid journal number")
+    if data.get("operation_id") is not None and type(data["operation_id"]) is not int:
+        raise ValueError("Invalid operation ID")
     data["time"] = datetime.fromisoformat(data["time"])
     data["error"] = ErrorKind(data["error"]) if data["error"] is not None else None
     data["packets"] = tuple((sending, bytes.fromhex(payload)) for sending, payload in data["packets"])

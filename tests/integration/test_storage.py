@@ -1,9 +1,21 @@
 from dataclasses import replace
 from datetime import datetime
+import json
 
 from all_protocol import storage
 from all_protocol.application.contracts import ErrorKind, JournalEntry
 from all_protocol.storage import ConnectionProfile, LocalHistory
+
+
+def test_old_journal_without_operation_id_remains_readable(tmp_path):
+    history = LocalHistory(tmp_path)
+    entry = JournalEntry(1, datetime(2026, 11, 7), "读取", "point", "read", 1, "成功", operation_id=7)
+    history.append_entry(entry)
+    assert history.recent_entries() == (entry,)
+    record = json.loads(history.journal_path.read_bytes())
+    record.pop("operation_id")
+    history.journal_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    assert history.recent_entries() == (replace(entry, operation_id=None),)
 
 
 def test_profiles_merge_by_protocol_and_endpoint(tmp_path):
