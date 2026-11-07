@@ -139,10 +139,13 @@ class MainWindow(QMainWindow):
         self.setMinimumWidth(640)
         self._bridge = bridge
         self._history = history
+        self._project_mode = bool(getattr(history, "project_mode", False))
         self._return_home = return_home
+        self.before_close: Callable[[], bool] | None = None
         self._profiles: tuple[ConnectionProfile, ...] = ()
         self._protocols = protocols
         self._forms = tuple(item.create_form() for item in protocols)
+        self._form_intervals = [1000] * len(protocols)
         self._state = SessionState()
         self._closing = False
         self._stopped = False
@@ -152,6 +155,8 @@ class MainWindow(QMainWindow):
         self.protocol = QComboBox()
         self.recent_connections = QComboBox()
         self.recent_connections.setAccessibleName("最近连接")
+        if self._project_mode:
+            self.recent_connections.setAccessibleName("项目设备")
         self.recent_connections.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.recent_connections.setMinimumContentsLength(17)
         self.recent_connections.setMaximumWidth(320)
@@ -180,6 +185,7 @@ class MainWindow(QMainWindow):
         self.interval.setValue(1000)
         self.interval.setSuffix(" ms")
         self.interval.setToolTip("两次读取之间的等待时间")
+        self.interval.valueChanged.connect(self._interval_changed)
         self.result_context = QLabel()
         self.result_context.setObjectName("resultContext")
         self.feedback = QLabel()
@@ -266,7 +272,7 @@ class MainWindow(QMainWindow):
         connection_header = QHBoxLayout()
         connection_header.addWidget(_heading("设备连接"), 1)
         if self._history is not None:
-            recent_label = QLabel("最近连接")
+            recent_label = QLabel("项目设备" if self._project_mode else "最近连接")
             recent_label.setObjectName("fieldLabel")
             recent_label.setBuddy(self.recent_connections)
             connection_header.addWidget(recent_label)
@@ -351,6 +357,18 @@ class MainWindow(QMainWindow):
 
     def _select_profile(self, index: int):
         profile = self.recent_connections.itemData(index)
+        if profile is None:
+            return
+        if self._project_mode and self.before_close is not None:
+            if not self.before_close():
+                self.recent_connections.setCurrentIndex(-1)
+                return
+            key = profile.key
+            profiles = self._history.profiles()
+            self._show_profiles(profiles)
+            index = next(i for i in range(self.recent_connections.count())
+                         if self.recent_connections.itemData(i).key == key)
+            profile = self.recent_connections.itemData(index)
         self.recent_connections.setCurrentIndex(index)
         protocol_index = self.protocol.findData(profile.protocol)
         form = self._forms[protocol_index]
@@ -370,9 +388,10 @@ class MainWindow(QMainWindow):
         if self._history is None or profile is None:
             return
         dialog = QMessageBox(self)
-        dialog.setWindowTitle("删除连接记录")
+        dialog.setWindowTitle("移除项目设备" if self._project_mode else "删除连接记录")
         dialog.setTextFormat(Qt.TextFormat.PlainText)
-        dialog.setText(f"删除这条最近连接记录？\n{self.recent_connections.currentText()}")
+        question = "从当前项目移除此设备？" if self._project_mode else "删除这条最近连接记录？"
+        dialog.setText(f"{question}\n{self.recent_connections.currentText()}")
         delete_button = dialog.addButton("删除", QMessageBox.ButtonRole.DestructiveRole)
         cancel_button = dialog.addButton("取消", QMessageBox.ButtonRole.RejectRole)
         dialog.setDefaultButton(cancel_button)
@@ -388,6 +407,9 @@ class MainWindow(QMainWindow):
             self._history_failure("无法删除最近连接记录")
             return
         self._show_profiles(profiles)
+        if self._project_mode:
+            # Do not silently add the removed device again on the next project save.
+            self._forms[self.protocol.findData(profile.protocol)].connection.host.clear()
         self._refresh()
 
     def _remember_connection(self, endpoint: str):
@@ -402,11 +424,34 @@ class MainWindow(QMainWindow):
             return
         if profiles != self._profiles:
             self._show_profiles(profiles)
-        self.recent_connections.setCurrentIndex(0)
+        key = self._registration.key, endpoint
+        self.recent_connections.setCurrentIndex(next(
+            (index for index in range(self.recent_connections.count())
+             if self.recent_connections.itemData(index).key == key), -1,
+        ))
+
+    def configuration_profiles(self) -> tuple[ConnectionProfile, ...]:
+        """Capture configured forms without issuing network operations."""
+        profiles = []
+        for index, (item, form) in enumerate(zip(self._protocols, self._forms, strict=True)):
+            if not isinstance(form, ProfileForm):
+                continue
+            # Empty, untouched connection forms are not project devices.
+            fields = getattr(form.connection, "host", None)
+            if fields is not None and not fields.text().strip():
+                continue
+            _, endpoint = form.connection_config()
+            profiles.append(ConnectionProfile(item.protocol.key, endpoint, form.profile_fields(), self._form_intervals[index]))
+        return tuple(profiles)
+
+    def _interval_changed(self, value):
+        self._form_intervals[self.protocol.currentIndex()] = value
 
     def _protocol_changed(self, index):
         self.connection_forms.setCurrentIndex(index)
         self.query_forms.setCurrentIndex(index)
+        if self._project_mode:
+            self.interval.setValue(self._form_intervals[index])
         self._query_changed()
 
     def _query_changed(self):
@@ -541,6 +586,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent):
         if self._stopped:
             event.accept()
+            return
+        if not self._closing and self.before_close is not None and not self.before_close():
+            event.ignore()
             return
         event.ignore()
         self._closing = True

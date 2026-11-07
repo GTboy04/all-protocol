@@ -72,6 +72,9 @@ class ServerPane(QWidget):
         controls.addStretch(1)
         controls.addWidget(self.dirty)
         self.save = self._button(controls, "保存方案", self._save_plan)
+        if getattr(self._storage, "project_mode", False):
+            self.save.setText("应用到项目")
+            self.save.setToolTip("暂存方案；请在首页保存项目文件")
         for control in (self.listen, self.status, self.dirty, self.save):
             controls.setAlignment(control, Qt.AlignmentFlag.AlignBottom)
         layout.addLayout(controls)
@@ -151,7 +154,8 @@ class ServerPane(QWidget):
         prompt = QMessageBox(
             QMessageBox.Icon.Question, "未保存的方案", f"离开前如何处理 {protocol} 方案修改？", parent=parent,
         )
-        save = prompt.addButton("保存并离开", QMessageBox.ButtonRole.AcceptRole)
+        save = prompt.addButton("应用并离开" if getattr(self._storage, "project_mode", False) else "保存并离开",
+                                QMessageBox.ButtonRole.AcceptRole)
         discard = prompt.addButton("放弃修改", QMessageBox.ButtonRole.DestructiveRole)
         cancel = prompt.addButton("取消", QMessageBox.ButtonRole.RejectRole)
         prompt.setDefaultButton(cancel)
@@ -211,7 +215,8 @@ class ServerPane(QWidget):
         self.listen.setEnabled(idle or running)
         self.host.setEnabled(idle)
         self.port.setEnabled(idle)
+        applied = "已应用到项目" if getattr(self._storage, "project_mode", False) else "已保存"
         self.dirty.setText("有未保存修改" if self._plan() != self._saved_plan else
-                           "方案未加载" if self._load_error else "已保存")
+                           "方案未加载" if self._load_error else applied)
         self.listener_changed.emit()
         return idle, running

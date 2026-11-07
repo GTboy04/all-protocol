@@ -195,6 +195,31 @@ def _load_server_request(line: bytes) -> ServerRequest:
     return ServerRequest(**data)
 
 
+def decode_modbus_plan(data) -> ServerPlan:
+    if (not isinstance(data, dict) or type(data.get("schema_version")) is not int
+            or data["schema_version"] not in (1, 2) or data.get("protocol") != "modbus-tcp"):
+        raise ValueError("方案版本或协议无法识别")
+    if not isinstance(data["stations"], list):
+        raise ValueError("从站必须是列表")
+    for station in data["stations"]:
+        if not isinstance(station, dict) or not isinstance(station.get("points"), list):
+            raise ValueError("从站点位必须是列表")
+    stations = tuple(
+        Station(station["unit_id"], station["name"], tuple(
+            ServerPoint(
+                Area(point["area"]), point["offset"], point["initial"], point["name"],
+                DataType(point["data_type"]) if point.get("data_type") is not None else None,
+                RegisterOrder(point.get("order", RegisterOrder.BIG)),
+            )
+            for point in station["points"]
+        ))
+        for station in data["stations"]
+    )
+    plan = ServerPlan(data["host"], data["port"], stations)
+    plan.validate()
+    return plan
+
+
 class ServerStorage:
     def __init__(self, directory: Path):
         self.directory = directory
@@ -206,28 +231,7 @@ class ServerStorage:
             data = json.loads(self.plan_path.read_bytes())
         except FileNotFoundError:
             return ServerPlan()
-        if (not isinstance(data, dict) or type(data.get("schema_version")) is not int
-                or data["schema_version"] not in (1, 2) or data.get("protocol") != "modbus-tcp"):
-            raise ValueError("方案版本或协议无法识别")
-        if not isinstance(data["stations"], list):
-            raise ValueError("从站必须是列表")
-        for station in data["stations"]:
-            if not isinstance(station, dict) or not isinstance(station.get("points"), list):
-                raise ValueError("从站点位必须是列表")
-        stations = tuple(
-            Station(station["unit_id"], station["name"], tuple(
-                ServerPoint(
-                    Area(point["area"]), point["offset"], point["initial"], point["name"],
-                    DataType(point["data_type"]) if point.get("data_type") is not None else None,
-                    RegisterOrder(point.get("order", RegisterOrder.BIG)),
-                )
-                for point in station["points"]
-            ))
-            for station in data["stations"]
-        )
-        plan = ServerPlan(data["host"], data["port"], stations)
-        plan.validate()
-        return plan
+        return decode_modbus_plan(data)
 
     def save_plan(self, plan: ServerPlan):
         plan.validate()
@@ -261,6 +265,25 @@ def _load_s7_server_request(line: bytes) -> S7ServerRequest:
     return S7ServerRequest(**data)
 
 
+def decode_s7_plan(data) -> S7ServerPlan:
+    if (not isinstance(data, dict) or type(data.get("schema_version")) is not int
+            or data["schema_version"] != 1 or data.get("protocol") != "s7"):
+        raise ValueError("S7 方案版本或协议无法识别")
+    if not isinstance(data["points"], list):
+        raise ValueError("点位必须是列表")
+    points = []
+    for point in data["points"]:
+        target = point["target"]
+        points.append(S7ServerPoint(
+            S7Target(S7Area(target["area"]), target["db"], target["offset"],
+                     S7DataType(target["data_type"]), target["count"], target["bit"]),
+            point["initial"], point["name"],
+        ))
+    plan = S7ServerPlan(data["host"], data["port"], tuple(points))
+    plan.validate()
+    return plan
+
+
 class S7ServerStorage:
     def __init__(self, directory: Path):
         self.directory = directory
@@ -272,22 +295,7 @@ class S7ServerStorage:
             data = json.loads(self.plan_path.read_bytes())
         except FileNotFoundError:
             return S7ServerPlan()
-        if (not isinstance(data, dict) or type(data.get("schema_version")) is not int
-                or data["schema_version"] != 1 or data.get("protocol") != "s7"):
-            raise ValueError("S7 方案版本或协议无法识别")
-        if not isinstance(data["points"], list):
-            raise ValueError("点位必须是列表")
-        points = []
-        for point in data["points"]:
-            target = point["target"]
-            points.append(S7ServerPoint(
-                S7Target(S7Area(target["area"]), target["db"], target["offset"],
-                         S7DataType(target["data_type"]), target["count"], target["bit"]),
-                point["initial"], point["name"],
-            ))
-        plan = S7ServerPlan(data["host"], data["port"], tuple(points))
-        plan.validate()
-        return plan
+        return decode_s7_plan(data)
 
     def save_plan(self, plan: S7ServerPlan):
         plan.validate()

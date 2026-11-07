@@ -18,7 +18,7 @@ def _s7_lifecycle(message):
 
 
 class ServerWorkbench(QMainWindow):
-    def __init__(self, data_dir, return_home):
+    def __init__(self, data_dir, return_home, plan_storages=None):
         super().__init__()
         self.setWindowTitle("工业协议调试台 · 服务端")
         self.resize(1120, 800)
@@ -30,9 +30,10 @@ class ServerWorkbench(QMainWindow):
         self._names = []
         self._build(return_home)
         try:
-            self._add("Modbus TCP", ServerSession, ModbusServerPane, ServerStorage(data_dir))
+            storages = plan_storages or (ServerStorage(data_dir), S7ServerStorage(data_dir))
+            self._add("Modbus TCP", ServerSession, ModbusServerPane, storages[0])
             self._add("Siemens S7", partial(ServerSession, create_server=S7Server, record_lifecycle=_s7_lifecycle),
-                      S7ServerPane, S7ServerStorage(data_dir))
+                      S7ServerPane, storages[1])
         except Exception:
             self.join()
             raise
