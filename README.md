@@ -1,149 +1,74 @@
-# 工业协议调试台
+# AllProtocol · 工业协议调试台
 
-Windows 桌面工业协议调试工具。同一个实例可同时打开客户端和服务端。支持 Modbus TCP 和 Siemens S7（ISO-on-TCP），提供点位读写、定时读取、请求日志及 TX/RX 字节查看。项目客户端可同时连接多台设备，两个协议的服务端可同时监听。
+[![GitHub Stars](https://img.shields.io/github/stars/GTboy04/all-protocol?style=flat&logo=github)](https://github.com/GTboy04/all-protocol/stargazers)
+[![MIT License](https://img.shields.io/github/license/GTboy04/all-protocol)](LICENSE)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
+![Windows](https://img.shields.io/badge/Platform-Windows-0078D4)
 
-## 获取源码并准备环境
+面向 PLC 和工业设备联调的 Windows 桌面工具。通过同一个工作区连接真实设备、启动模拟服务、监视点位并查看原始报文。支持 **Modbus TCP** 和 **Siemens S7（经典 S7comm / ISO-on-TCP）**，两个协议均可作为客户端和服务端运行。
 
-在 Windows 上安装 Git 和 uv，然后打开 PowerShell。项目使用 Python 3.12，可以直接通过 uv 安装。 [uv 安装说明](https://docs.astral.sh/uv/getting-started/installation/)
+[快速开始](#快速开始) · [本机联调](#本机联调) · [使用指南](docs/user-guide.md) · [参与贡献](#参与贡献) · [Star 趋势](#star-趋势)
+
+![AllProtocol 项目工作区，显示 Modbus TCP 模拟点位、运行中的场景及请求报文](docs/assets/workspace.png)
+
+## 功能概览
+
+| 能力 | 支持范围 |
+| --- | --- |
+| Modbus TCP | 按 Unit ID 访问 HR、IR、Coil 和 DI。支持 16、32、64 位寄存器类型及多种字节序和字序 |
+| Siemens S7 | 访问 DB、M、I、Q 区，支持 Bool、Byte、Int、Word、DInt、DWord 和 Real。I 区对网络客户端只读 |
+| 多设备与点表 | 独立连接和轮询多台设备，使用命名点表查看原始值、工程值和采样质量，支持 JSON 和 CSV 导入 |
+| 服务端场景 | 两个协议可同时监听。点位支持固定值、递增、心跳、斜坡、正弦和时间轴，可暂停、重置或手动接管 |
+| 项目与报文 | 保存设备、点表和服务端方案到可移植的项目文件，联调时查看请求结果及 TX / RX 十六进制报文 |
+
+## 快速开始
+
+在 Windows 上安装 Git 和 [uv](https://docs.astral.sh/uv/getting-started/installation/)，然后在 PowerShell 运行。
 
 ```powershell
 git clone https://github.com/GTboy04/all-protocol.git
 cd all-protocol
 uv python install 3.12
 uv sync --locked --python 3.12
-```
-
-如果已经克隆了仓库，从仓库根目录执行后两条命令即可。uv 会创建 `.venv`，并按 `uv.lock` 安装依赖。下面的命令也在仓库根目录运行。
-
-## 打包 Windows 应用
-
-使用项目的 [AllProtocol.spec](AllProtocol.spec) 打包。命令会自动安装 `release` 依赖组中的 PyInstaller。`--noconfirm` 会直接替换已有的 `dist/AllProtocol`。
-
-```powershell
-uv run --locked --group release pyinstaller --noconfirm AllProtocol.spec
-```
-
-打包完成后，运行可执行文件并确认能进入角色选择页。
-
-```powershell
-.\dist\AllProtocol\AllProtocol.exe
-```
-
-运行目录是 `dist/AllProtocol`，其中包含 `AllProtocol.exe` 和存放 Python、Qt 等运行依赖的 `_internal`。复制到另一台 Windows 电脑时，请保留整个目录。可以用下面的命令生成 ZIP，接收者解压后运行其中的 `AllProtocol.exe`，无需另装 Python 或 uv。
-
-```powershell
-Compress-Archive -LiteralPath .\dist\AllProtocol -DestinationPath .\dist\AllProtocol-windows.zip -Force
-```
-
-## 从源码运行和测试
-
-```powershell
 uv run --locked python -m all_protocol
+```
+
+临时联调可从首页进入「本地调试」。需要保存设备、点表与模拟规则时，选择「新建项目」并进入项目工作区。构建 Windows 可执行文件的命令见 [Windows 打包指南](docs/user-guide.md#打包-windows-应用)。
+
+## 本机联调
+
+1. 在服务端选择 **Modbus TCP**，新增 Unit ID 为 `1` 的从站，并添加一个偏移为 `0`、类型为 UInt16 的 HR 点位。
+2. 如需动态值，在启动监听前打开「场景模拟…」，为该点配置斜坡或周期递增。点击「启动服务」，再从「场景模拟…」启动场景。
+3. 在 Modbus TCP 客户端连接 `127.0.0.1:1502`，读取同一个点位。可在请求日志中选中一条记录，查看对应的 TX / RX 报文。
+
+也可以启动 **Siemens S7** 服务，用客户端连接 `127.0.0.1:1102`（Rack 0 / Slot 1），读取预置点位 `DB1.DBW0`。
+
+## 文档
+
+- [使用指南](docs/user-guide.md)涵盖源码运行、Windows 打包、项目文件、客户端与服务端配置。
+- [开发路线](docs/requirements/README.md)记录功能状态和验收范围。
+- [Modbus TCP 服务端设计](docs/modbus-tcp-server-design.md)、[Siemens S7 客户端设计](docs/s7-client-design.md)和[场景模拟](docs/requirements/R7-simulation.md)提供协议和运行细节。
+
+## 参与贡献
+
+欢迎通过 [GitHub Issues](https://github.com/GTboy04/all-protocol/issues) 报告问题或提出功能建议，也欢迎提交 Pull Request。报告联调问题时，请附上协议、复现步骤和脱敏后的报文。
+
+提交改动前可运行以下命令验证。测试使用本机临时端口，覆盖协议读写、模拟场景、项目存储和桌面交互。
+
+```powershell
 uv run --locked pytest -q
 ```
 
-测试会在本机临时端口启动 TCP 服务，覆盖客户端、服务端和本地存储。
+## Star 趋势
 
-## 项目文件
+<a href="https://www.star-history.com/?repos=GTboy04%2Fall-protocol&amp;type=Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=GTboy04/all-protocol&amp;type=Date&amp;theme=dark">
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=GTboy04/all-protocol&amp;type=Date">
+    <img alt="AllProtocol 的 GitHub Star 数量随时间的变化" src="https://api.star-history.com/svg?repos=GTboy04/all-protocol&amp;type=Date">
+  </picture>
+</a>
 
-首页提供「新建项目」「打开项目…」「保存项目」「另存为…」「从本地配置新建…」和「本地调试」。项目文件使用 `.allprotocol.json`，保存项目名称、多个客户端设备的连接/查询参数及轮询间隔，以及 Modbus TCP、S7 服务端方案。可复制给其他电脑并直接打开，打开时不会自动连接设备或启动监听。
+## 许可证
 
-新建或打开项目后，点击「进入项目工作区」。左侧项目树列出设备、点表和模拟服务；中间可做快速读写、监视点表、编辑服务端方案或查看当前值。顶部显示连接数、监听数和异常数，点击「异常」可依次定位出错的设备或服务。底部日志和 TX/RX 报文随当前视图切换，可收起；窄窗口也可收起项目树或滚动表单。切换视图时后台连接、轮询和监听继续运行。
-
-填写主机和查询参数后即可保存项目，无需先连接；相同协议和端点更新原设备，不同端点添加为另一个设备。非空但无效的配置需修正后再保存。服务端「应用到项目」仅暂存方案，点击工作区或首页的「保存项目」才写入文件，也会收集尚未应用的方案修改。运行时当前值不会覆盖方案初始值。
-
-保存项目时同时保存已调整的分隔位置、显示区域和当前视图。重新进入工作区时恢复布局，不自动连接、轮询或监听。切换项目或进入本地调试前请先关闭工作区；取消关闭会保留所有会话。「从本地配置新建…」复制最近连接与已保存方案，保留本地原文件。日志仍保存在本机，不随项目文件导出。保存使用原子替换；当前文件被其他程序修改或删除时会拒绝覆盖，可另存为副本。
-
-[开发需求与实施路线](docs/requirements/README.md) · [R6 项目工作区](docs/requirements/R6-workspace.md)
-
-## 多设备连接
-
-项目客户端可从项目树选择设备并单独连接，也可点击「连接全部」。每台设备独立连接、读写和轮询；项目树显示各设备状态。批量操作显示成功/失败数，悬停结果可查看逐台详情，一台失败不停止其他设备。
-
-连接期间仍可从项目树切换设备，恢复所选设备的快速读取结果、点表采样和请求日志。点表页中的轮询组数和任务队列属于当前设备。「新增设备」进入离线草稿，原设备继续工作；填写配置后可保存或连接。正在连接或已连接的设备不能修改连接参数，草稿也不能覆盖运行设备的连接配置；先断开后再修改。相同端点且参数一致的草稿会切换到已经连接的设备，不重复连接。
-
-选中连接中的设备可点击「取消连接」，选中已连接设备可单独断开；「断开全部」清理所有设备的任务和连接。重连需要手动执行，轮询也需重新启动，写入不会自动重放。关闭工作区会等待全部设备和监听释放资源后退出。本地调试模式仍使用单连接。
-
-「移除设备…」可用于正在运行的设备：确认后先断开并清理该设备，再移除配置及关联点表，其他设备继续运行。清理完成前暂不能保存项目。所有设备的日志共用本机最近 500 条记录，选中设备时过滤展示；日志详情包含设备 ID、唯一会话 ID、代次、任务和请求 ID。旧日志按协议及端点兼容展示。 [R4 开发与交付记录](docs/requirements/R4-multi-session.md)
-
-## 命名点位与点表
-
-在项目模式进入客户端后，中部提供「快速读写」和「点表」页签。填写连接参数后，可在点表页点击「保存设备配置」，无需先连接。每台设备可新建多张点表，支持重命名、复制、删除及新增、编辑、删除点位。
-
-每个点位表示一个值，保存名称、协议地址与类型、单位、倍率、偏置、显示精度和说明。连接后点击「读取整表」，在表格中并排显示原始值和 `原始值 × 倍率 + 偏置` 得到的工程值。配置一致且地址连续的相邻行会在协议数量上限内合并读取；日志按实际请求记录 TX/RX。单个请求失败不停止剩余读取，断开会中止剩余任务。选中可写点位后，可点击「写入原始值…」并确认；工程值暂不支持反向写入。
-
-「批量编辑…」提供 CSV 文本编辑器，先「校验并预览」，再「应用整表修改」。`address_offset` 是协议地址偏移，`offset` 是工程值偏置；保留已有 `id` 可保留点位身份。例如 Modbus TCP 点位可输入：
-
-```csv
-name,area,address_offset,data_type,unit,scale,offset,precision,unit_id,order
-出口温度,HR,0,UInt16,℃,0.1,0,1,1,big
-运行反馈,Coil,0,Bool,,1,0,0,1,big
-```
-
-「导入…」接受 JSON 点表或 UTF-8 CSV 文件，校验后预览，确认才新增点表；「导出 JSON…」导出选中的表。文件导入和复制会生成新的点表、点位 ID。配置修改后仍需回首页保存项目；采样值不会写入项目。删除设备时会提示并删除关联点表。
-
-项目格式现为 v3，支持打开 v1/v2 项目，读取时不修改源文件，显式保存后升级到 v3；旧版程序无法读取 v3。点表 JSON 格式为 v2，支持导入 v1 点表。 [R2 开发与交付记录](docs/requirements/R2-point-tables.md)
-
-## 多组轮询与采样质量
-
-在项目客户端的「点表」页，为每张表设置「本表周期」和「过期时间」，点击「启动本表轮询」。切换到另一张表可设置不同周期并独立启动，后台各组继续运行。周期为 200–30000 ms，过期时间为 200–3600000 ms，默认分别为 1000 和 3000 ms。配置随项目保存，打开项目后仍需手动连接和启动轮询。
-
-轮询期间可执行快速读写、读取整表或写入点位原始值。每个连接串行收发；手动任务优先，连续最多执行 3 个手动请求后给到期轮询组一次机会。手动任务最多 32 个（含执行中的任务），界面显示数量和队列满状态；未能入队的请求明确提示未发送。实际刷新频率受请求耗时和其他任务影响，慢响应跳过遗漏周期，不积压补发。
-
-「停止本表轮询」移除该组待执行请求，已经发送的请求继续完成；「停止全部轮询」同时停止所有点表组及快速轮询。断开连接会取消当前请求并清空队列，尚未发送的任务记为「已取消（未发送）」。写入已发送但无法确认时继续显示「写入结果未知」，不自动重发。快速读写入口的轮询保留失败后停止行为；命名点表轮询在超时或协议错误后继续后续周期。
-
-表格分别显示最后采样、最后成功时间和质量：未采样、有效、超时、断开、协议失败、过期。失败保留最后成功值并标记旧数据；超过过期时间的有效值变为过期，重连成功后旧值仍需重新采样才恢复有效。修改点位地址或类型会清除该点旧采样。运行中的表需停止轮询后再编辑配置。日志详情中的任务 ID 可关联同一整表任务或轮询组的请求。 [R3 开发与交付记录](docs/requirements/R3-scheduling.md)
-
-## Modbus TCP 客户端
-
-填写主机、端口和超时后连接，再按设备文档选择 Unit ID、数据区、起始偏移、数据类型、寄存器顺序及点位数量。起始偏移从 0 开始。HR 和 IR 支持 UInt16、Int16、UInt32、Int32、UInt64、Int64、Float32 和 Float64。16、32、64 位类型每点分别占用 1、2、4 个连续寄存器。Coil 和 DI 使用 Bool，每点占 1 位。读取结果同时显示解析值和原始十六进制数据。需要查看报文时，选中底部日志中的对应请求。
-
-### 最近连接和请求日志
-
-发起连接时，软件按协议和设备地址保存配置。执行读取、写入或启动轮询时，会更新该设备最近使用的点位和轮询间隔。重启后自动填入最近使用的设备，也可从「最近连接」切换到其他设备，点击「连接」后才会发起连接。
-
-本地调试模式中，断开设备后可在「最近连接」选中一条记录，点击「删除记录…」并确认。之后重新连接该设备时会重新保存配置。
-
-Windows 本地数据保存在 `%LOCALAPPDATA%\AllProtocol`。`connections.json` 保存连接配置，`requests.jsonl` 保存请求结果、错误详情及 TX/RX 报文。请求日志列表显示最近 500 条。追加日志将超过 5 MB（5,242,880 字节）时，清除旧日志并从当前这条重新记录。日志清理独立于连接历史。
-
-## 服务端工作台
-
-从首页进入「服务端」，使用顶部标签选择协议。每个标签独立启动或停止监听，切换标签时已开启的监听和客户端连接继续运行。关闭服务端工作台或首页后，应用会停止全部监听、关闭已接入的客户端连接并释放端口。 [多协议服务端设计](docs/multi-protocol-server-design.md)
-
-### 场景模拟
-
-在项目工作区或本地服务端停止监听后，点击「场景模拟…」，选中点位并配置固定值、周期递增、心跳翻转、斜坡、正弦或时间轴。时间轴每行使用 `毫秒 = 数值`，例如 `500 = 1` 表示场景启动 500 ms 后赋值为 1。规则随方案或项目保存。
-
-启动监听后，在同一入口点击「启动场景」。暂停保持当前值并冻结场景时间，重置恢复规则点位的方案初始值。手动修改当前值或由客户端成功写入会接管对应点位，选中该点并点击「恢复自动模拟」可重新交给场景。 [R7 开发与交付记录](docs/requirements/R7-simulation.md)
-
-### Modbus TCP 服务端
-
-1. 在服务端选择「Modbus TCP」，新增从站并为 HR、IR、Coil 或 DI 添加点位。偏移从 0 开始。批量添加时按每点占用的寄存器数依次排布，弹窗会显示占用地址。
-2. 点击「启动服务」。本机默认监听 `127.0.0.1:1502`。点击「返回首页」再进入客户端，用相同端口、Unit ID、偏移、类型和寄存器顺序访问点位。局域网联调时将监听地址改为本机网卡 IP。
-3. 监听中可在点位表修改当前值来模拟输入。客户端写入 HR 或 Coil 后，当前值会同步刷新。选中请求日志即可查看 RX 和 TX 报文。
-
-「保存方案」将监听参数、从站和点位初始值保存到 `%LOCALAPPDATA%\AllProtocol\modbus-tcp-server.json`。每次启动监听从初始值创建当前值。服务端日志独立保存在 `server-requests.jsonl`，沿用 5 MB 清理和最近 500 条的展示规则。
-
-[服务端设计文档](docs/modbus-tcp-server-design.md) · [角色选择与服务端界面草图](docs/modbus-tcp-server-draft.html)
-
-### Siemens S7 服务端
-
-1. 在服务端选择「Siemens S7」，默认监听 `127.0.0.1:1102`，预置 `DB1.DBW0`（Word，初始值 0）。可添加 DB、M、I、Q 点位及 Bool、Byte、Int、Word、DInt、DWord、Real 类型。
-2. 点击「启动服务」，回到客户端选择「Siemens S7（ISO-on-TCP）」，填入 `127.0.0.1:1102`、Rack 0、Slot 1，再读写 `DB1.DBW0`。第三方客户端可用经典 S7comm 的 Read Var 和 Write Var 访问模拟内存。
-3. 监听时可通过「修改当前值」模拟 PLC 值变化，包括 I 输入区。I 区对网络客户端只读。选中日志可查看对应的 RX / TX 报文。
-
-S7 方案保存在 `%LOCALAPPDATA%\AllProtocol\s7-server.json`，日志保存在 `s7-server-requests.jsonl`。重新启动监听时从方案初始值加载。
-
-## Siemens S7 客户端
-
-1. 进入客户端，选择「Siemens S7（ISO-on-TCP）」。填写 PLC 地址和端口（默认 102），Rack 和 Slot 按实际硬件配置填写。
-2. 连接成功后选择 DB、M、I 或 Q 区，填写从 0 开始的字节偏移。选 DB 区时需填写 DB 号。比如读取 `DB1.DBX2.3`，选择 DB 1、字节偏移 2、Bool、位索引 3。选择 Int、Word、DInt、DWord 或 Real 时，相邻点分别以 2 或 4 字节递增。
-3. 点击「读取」或「轮询」。DB、M、Q 可通过「写入…」输入并确认数值，I 区只读。选中请求日志可查看原始收发帧。写入结果未知时，可重新连接并读取点位核对。
-
-使用经典 S7comm 的 S7-1200/1500 需要按 CPU 设置允许 PUT/GET，并为要访问的 DB 使用标准块访问。 [西门子 PUT/GET 手册](https://docs.tia.siemens.cloud/r/simatic_s7_1200_manual_collection_enus_20/communication/s7-communication/get-and-put-read-and-write-from-a-remote-cpu) · [S7 客户端设计](docs/s7-client-design.md)
-
-## 开发与许可
-
-新增协议时，实现 `application/contracts.py` 中的会话契约，为协议提供连接配置和目标表单，并在 `__main__.py` 中登记。连接生命周期、轮询与请求日志由通用会话层提供。表单可实现 `profile_fields()` 和 `restore_profile()` 以接入最近连接。 [V1 开发文档](docs/v1-development.md)
-
-项目源码采用 [MIT 许可证](LICENSE)。公开分发 Windows 打包产物时，还需随包提供所含第三方依赖要求的许可和声明。
+本项目采用 [MIT 许可证](LICENSE)。
