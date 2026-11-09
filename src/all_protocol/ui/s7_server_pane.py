@@ -7,8 +7,8 @@ from ..adapters.s7.model import MAX_OFFSET, Area, DataType, S7Target
 from ..adapters.s7.server_model import S7Memory, S7ServerPlan, S7ServerPoint, S7ValuesChanged
 from ..application.server_contracts import ListenerState, RequestMetadata, ServerEvent
 from .main_window import Rows, _heading, _panel, _table
-from .server_pane import EditDialog, ServerPane
-from .widgets import spinbox
+from .server_pane import ServerPane
+from .widgets import EditDialog, spinbox
 
 
 AREAS = ((Area.DB, "DB 数据块"), (Area.M, "M 标志"), (Area.I, "I 输入"), (Area.Q, "Q 输出"))
@@ -93,6 +93,14 @@ class S7ServerPane(ServerPane):
     def _plan(self):
         return S7ServerPlan(self.host.text().strip(), self.port.value(), self._points)
 
+    def set_simulation_rule(self, target, rule):
+        index = self.point_table.currentIndex()
+        self._points = tuple(replace(point, simulation=rule) if point.target == target else point
+                             for point in self._points)
+        self._show_points()
+        if index.isValid():
+            self.point_table.selectRow(index.row())
+
     @property
     def _point(self):
         index = self.point_table.currentIndex()
@@ -144,7 +152,8 @@ class S7ServerPane(ServerPane):
 
         def commit():
             selection = selected()
-            point = S7ServerPoint(selection, _parse_value(selection.data_type, initial.text()), name.text().strip())
+            point = S7ServerPoint(selection, _parse_value(selection.data_type, initial.text()), name.text().strip(),
+                                  original.simulation if original else None)
             if original is None:
                 points = self._points + (point,)
             else:

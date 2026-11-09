@@ -1,47 +1,19 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-    QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QWidget,
 )
 
 from ..application.server_contracts import ListenerState, ListenerUpdate, RequestMetadata, RuntimeChange, ServerLifecycle
+from ..application.simulation import SimulationUpdate
 from .main_window import Rows, _heading, _panel, _table
+from .simulation_dialog import SimulationDialog
 from .widgets import add_field, spinbox
-
-
-class EditDialog(QDialog):
-    def __init__(self, parent, title, commit):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setMinimumWidth(350)
-        self.commit = commit
-        layout = QVBoxLayout(self)
-        self.form = QFormLayout()
-        layout.addLayout(self.form)
-        self.error = QLabel()
-        self.error.setObjectName("warning")
-        self.error.setTextFormat(Qt.TextFormat.PlainText)
-        self.error.setWordWrap(True)
-        layout.addWidget(self.error)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def accept(self):
-        try:
-            self.commit()
-        except ValueError as error:
-            self.error.setText(str(error))
-            return
-        super().accept()
 
 
 class ServerPane(QWidget):
     listener_changed = Signal()
+    simulation_changed = Signal()
 
     def __init__(self, bridge, storage, default_plan):
         super().__init__()
@@ -51,6 +23,7 @@ class ServerPane(QWidget):
         self.state = ListenerState.STOPPED
         self.endpoint = ""
         self.listener_error = ""
+        self.simulation_update: SimulationUpdate | None = None
         self._load_error = False
 
     @property
@@ -87,6 +60,12 @@ class ServerPane(QWidget):
         for control in (self.listen, self.status, self.dirty, self.save):
             controls.setAlignment(control, Qt.AlignmentFlag.AlignBottom)
         layout.addLayout(controls)
+        scene = QHBoxLayout()
+        self.scene_button = self._button(scene, "场景模拟…", self._open_simulation)
+        self.scene_status = QLabel()
+        self.scene_status.setObjectName("resultContext")
+        scene.addWidget(self.scene_status, 1)
+        layout.addLayout(scene)
         self.feedback = QLabel()
         self.feedback.setObjectName("warning")
         self.feedback.setTextFormat(Qt.TextFormat.PlainText)
@@ -96,6 +75,24 @@ class ServerPane(QWidget):
         self.host.textChanged.connect(self._refresh)
         self.port.valueChanged.connect(self._refresh)
         return panel
+
+    def _open_simulation(self):
+        dialog = SimulationDialog(self)
+        dialog.exec()
+        dialog.deleteLater()
+
+    def _refresh_simulation(self):
+        update = self.simulation_update
+        if update is not None:
+            status = str(update.state)
+            if update.held:
+                status += f" · {len(update.held)} 点已接管"
+            if update.faults:
+                status += f" · {len(update.faults)} 点异常"
+        else:
+            configured = next(self._plan().simulation_points(configured_only=True), None)
+            status = "启动服务后可运行场景" if configured else "场景未配置"
+        self.scene_status.setText(status)
 
     def _journal_panel(self, headers, format_row, numbers=(), monospace=()):
         panel, layout = _panel()
@@ -200,6 +197,8 @@ class ServerPane(QWidget):
         payload = event.payload
         if isinstance(payload, ListenerUpdate):
             previous, self.state = self.state, payload.state
+            if self.state == ListenerState.STOPPED:
+                self.simulation_update = None
             self.endpoint = event.endpoint
             self.listener_error = payload.error
             if payload.error:
@@ -217,6 +216,10 @@ class ServerPane(QWidget):
             self.requests.prepend(event)
         elif isinstance(payload, RuntimeChange):
             self._runtime_changed(payload.details)
+        elif isinstance(payload, SimulationUpdate):
+            self.simulation_update = payload
+            self._refresh_simulation()
+            self.simulation_changed.emit()
 
     def _show_request(self, index, _previous):
         if index.isValid():
@@ -244,5 +247,6 @@ class ServerPane(QWidget):
         applied = "已应用到项目" if getattr(self._storage, "project_mode", False) else "已保存"
         self.dirty.setText("有未保存修改" if self._plan() != self._saved_plan else
                            "方案未加载" if self._load_error else applied)
+        self._refresh_simulation()
         self.listener_changed.emit()
         return idle, running

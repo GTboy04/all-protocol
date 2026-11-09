@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from ipaddress import ip_address
 
 from ...application.contracts import ClientError, Value
+from ...application.simulation import SimulationPoint, SimulationRule, WriteSpan, compile_rule
 from .model import Area, DataType, S7Target
 
 
@@ -10,6 +11,7 @@ class S7ServerPoint:
     target: S7Target
     initial: Value = 0
     name: str = ""
+    simulation: SimulationRule | None = None
 
     def encode(self, value: Value) -> bytes:
         try:
@@ -48,6 +50,21 @@ class S7ServerPlan:
                 if previous & mask:
                     raise ValueError(f"{target.address()} 与已有点位重叠")
                 occupied[key] = previous | mask
+        for point in self.simulation_points(configured_only=True):
+            compile_rule(point, point.rule)
+
+    def simulation_points(self, *, configured_only=False):
+        for point in self.points:
+            if configured_only and point.simulation is None:
+                continue
+            target = point.target
+            boolean = target.data_type == DataType.BOOL
+            mask = 1 << target.bit if boolean else 0xFF
+            span = WriteSpan((target.area, target.db), target.offset, target.offset + target.byte_count, mask)
+            address = target.address()
+            label = f"{point.name} · {address}" if point.name else address
+            yield SimulationPoint(target, label, point.initial, point.encode, span, target.data_type == DataType.REAL,
+                                  boolean, point.simulation)
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +73,7 @@ class S7ValuesChanged:
     db: int
     offset: int
     data: bytes
+    mask: int = 0xFF
 
 
 class S7Memory:
@@ -74,12 +92,13 @@ class S7Memory:
     def set_point(self, point: S7ServerPoint, value: Value) -> S7ValuesChanged:
         target = point.target
         data = point.encode(value)
+        mask = 0xFF
         if target.data_type == DataType.BOOL:
             key = target.area, target.db, target.offset
             previous = self._bytes.get(key, 0)
             mask = 1 << target.bit
             data = bytes(((previous & ~mask) | (data[0] << target.bit),))
-        change = S7ValuesChanged(target.area, target.db, target.offset, data)
+        change = S7ValuesChanged(target.area, target.db, target.offset, data, mask)
         self.apply(change)
         return change
 

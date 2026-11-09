@@ -15,6 +15,7 @@ from .adapters.s7.model import Area as S7Area, DataType as S7DataType, S7Target
 from .adapters.s7.server_model import S7ServerPlan, S7ServerPoint
 from .application.contracts import ErrorKind, JournalEntry
 from .application.server_contracts import LifecycleAction, RequestMetadata, ServerEvent, ServerLifecycle
+from .application.simulation import decode_rule
 
 
 LOG_LIMIT_BYTES = 5 * 1024 * 1024
@@ -254,9 +255,26 @@ class _ServerJournal:
             return _append_journal(self.journal_path, record)
 
 
+def _point_record(point) -> dict:
+    record = asdict(point)
+    if point.simulation is None:
+        del record["simulation"]
+    else:
+        record["simulation"]["actions"] = list(record["simulation"]["actions"])
+    return record
+
+
+def encode_modbus_plan(plan: ServerPlan) -> dict:
+    stations = [{"unit_id": station.unit_id, "name": station.name,
+                 "points": [_point_record(point) for point in station.points]} for station in plan.stations]
+    has_rules = any("simulation" in point for station in stations for point in station["points"])
+    return {"schema_version": 3 if has_rules else 2, "protocol": "modbus-tcp",
+            "host": plan.host, "port": plan.port, "stations": stations}
+
+
 def decode_modbus_plan(data) -> ServerPlan:
     if (not isinstance(data, dict) or type(data.get("schema_version")) is not int
-            or data["schema_version"] not in (1, 2) or data.get("protocol") != "modbus-tcp"):
+            or data["schema_version"] not in (1, 2, 3) or data.get("protocol") != "modbus-tcp"):
         raise ValueError("方案版本或协议无法识别")
     if not isinstance(data["stations"], list):
         raise ValueError("从站必须是列表")
@@ -269,6 +287,7 @@ def decode_modbus_plan(data) -> ServerPlan:
                 Area(point["area"]), point["offset"], point["initial"], point["name"],
                 DataType(point["data_type"]) if point.get("data_type") is not None else None,
                 RegisterOrder(point.get("order", RegisterOrder.BIG)),
+                decode_rule(point.get("simulation")),
             )
             for point in station["points"]
         ))
@@ -298,13 +317,20 @@ class ServerStorage(_ServerJournal):
 
     def save_plan(self, plan: ServerPlan):
         plan.validate()
-        record = {"schema_version": 2, "protocol": "modbus-tcp", **asdict(plan)}
+        record = encode_modbus_plan(plan)
         with _locked(self.directory, "server-plan.lock"):
             _replace_file(self.plan_path, _json_bytes(record))
 
+def encode_s7_plan(plan: S7ServerPlan) -> dict:
+    points = [_point_record(point) for point in plan.points]
+    has_rules = any("simulation" in point for point in points)
+    return {"schema_version": 2 if has_rules else 1, "protocol": "s7",
+            "host": plan.host, "port": plan.port, "points": points}
+
+
 def decode_s7_plan(data) -> S7ServerPlan:
     if (not isinstance(data, dict) or type(data.get("schema_version")) is not int
-            or data["schema_version"] != 1 or data.get("protocol") != "s7"):
+            or data["schema_version"] not in (1, 2) or data.get("protocol") != "s7"):
         raise ValueError("S7 方案版本或协议无法识别")
     if not isinstance(data["points"], list):
         raise ValueError("点位必须是列表")
@@ -314,7 +340,7 @@ def decode_s7_plan(data) -> S7ServerPlan:
         points.append(S7ServerPoint(
             S7Target(S7Area(target["area"]), target["db"], target["offset"],
                      S7DataType(target["data_type"]), target["count"], target["bit"]),
-            point["initial"], point["name"],
+            point["initial"], point["name"], decode_rule(point.get("simulation")),
         ))
     plan = S7ServerPlan(data["host"], data["port"], tuple(points))
     plan.validate()
@@ -340,6 +366,6 @@ class S7ServerStorage(_ServerJournal):
 
     def save_plan(self, plan: S7ServerPlan):
         plan.validate()
-        record = {"schema_version": 1, "protocol": "s7", **asdict(plan)}
+        record = encode_s7_plan(plan)
         with _locked(self.directory, "s7-server-plan.lock"):
             _replace_file(self.plan_path, _json_bytes(record))

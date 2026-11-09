@@ -1,10 +1,11 @@
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 
 from .contracts import Value
+from .simulation import SimulationPoint, SimulationUpdate, WriteSpan
 
 
 class ListenerState(StrEnum):
@@ -51,7 +52,7 @@ class ServerEvent:
     protocol: str
     endpoint: str
     time: datetime
-    payload: ListenerUpdate | ServerLifecycle | RequestMetadata | RuntimeChange
+    payload: ListenerUpdate | ServerLifecycle | RequestMetadata | RuntimeChange | SimulationUpdate
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +61,7 @@ class ServerCallbacks:
 
     request: Callable[[datetime, RequestMetadata], None]
     changed: Callable[[object], None]
+    written: Callable[[WriteSpan], None] | None = None
 
 
 class ServerAdapter(Protocol):
@@ -87,3 +89,4 @@ class ServerRegistration:
     label: str
     create_adapter: Callable[[object, ServerCallbacks], ServerAdapter]
     capabilities: frozenset[ServerCapability]
+    simulation_points: Callable[[object], Iterable[SimulationPoint]] | None = None

@@ -15,7 +15,7 @@ from .application.contracts import ClientError
 from .point_tables import PointTable, decode_table, table_record
 from .storage import (
     ConnectionProfile, LocalHistory, ServerStorage, S7ServerStorage,
-    _load_profile, _locked, _replace_file, decode_modbus_plan, decode_s7_plan,
+    _load_profile, _locked, _replace_file, decode_modbus_plan, decode_s7_plan, encode_modbus_plan, encode_s7_plan,
 )
 
 
@@ -113,17 +113,10 @@ class Project:
 
 
 def project_record(project: Project) -> dict:
-    modbus = {"schema_version": 2, "protocol": "modbus-tcp", **asdict(project.modbus)}
-    modbus["stations"] = [
-        {**asdict(station), "points": [asdict(point) for point in station.points]}
-        for station in project.modbus.stations
-    ]
-    s7 = {"schema_version": 1, "protocol": "s7", **asdict(project.s7)}
-    s7["points"] = [asdict(point) for point in project.s7.points]
     record = {
         "format": "all-protocol-project", "schema_version": 3, "name": project.name,
         "devices": [asdict(item) for item in project.devices],
-        "servers": {"modbus-tcp": modbus, "s7": s7},
+        "servers": {"modbus-tcp": encode_modbus_plan(project.modbus), "s7": encode_s7_plan(project.s7)},
         "point_tables": [table_record(table) for table in project.point_tables],
     }
     if project.layout is not None:

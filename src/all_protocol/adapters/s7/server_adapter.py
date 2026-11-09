@@ -1,8 +1,9 @@
 from ...application.contracts import Value
 from ...application.server_contracts import RequestMetadata, ServerCallbacks
+from ...application.simulation import WriteSpan
 from .model import S7Target
 from .server import S7Server, S7ServerRequest
-from .server_model import S7ServerPlan
+from .server_model import S7ServerPlan, S7ValuesChanged
 
 
 class S7ServerAdapter:
@@ -25,8 +26,14 @@ class S7ServerAdapter:
         details = (("function", request.function), ("target", request.target))
         self._callbacks.request(request.time, RequestMetadata(request.peer, request.result, request.rx, request.tx, details))
 
+    def _changed(self, change: S7ValuesChanged):
+        self._callbacks.changed(change)
+        if self._callbacks.written is not None:
+            self._callbacks.written(WriteSpan((change.area, change.db), change.offset,
+                                              change.offset + len(change.data), change.mask))
+
     async def bind(self):
-        self._server = S7Server(self._plan, self._callbacks.changed, self._record)
+        self._server = S7Server(self._plan, self._changed, self._record)
         await self._server.bind()
 
     async def shutdown(self):

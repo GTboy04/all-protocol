@@ -15,6 +15,7 @@ from all_protocol.adapters.s7.model import Area as S7Area, DataType, S7Target
 from all_protocol.adapters.s7.server_model import S7ServerPlan, S7ServerPoint
 from all_protocol.application.contracts import ConnectionState, ProtocolRegistration
 from all_protocol.application.server_contracts import ListenerState
+from all_protocol.application.simulation import RuleKind, SimulationState
 from all_protocol.point_tables import PointDefinition, PointTable
 from all_protocol.project import Project, ProjectDevice, ProjectFile, ProjectWorkspace, WorkspaceLayout
 from all_protocol.storage import ConnectionProfile
@@ -22,6 +23,7 @@ from all_protocol.ui.main_window import DesktopProtocol
 from all_protocol.ui.modbus_tcp_form import ModbusTcpForm
 from all_protocol.ui.role_window import RoleWindow
 from all_protocol.ui.s7_form import S7Form
+from all_protocol.ui.simulation_dialog import RuleDialog, SimulationDialog
 from all_protocol.ui.style import STYLE
 
 
@@ -207,3 +209,64 @@ def test_stale_selection_and_narrow_window_leave_tree_and_controls_available(wor
     assert window.tree.isHidden()
     window.nav_button.click()
     assert not window.tree.isHidden()
+
+
+def test_project_scene_controls_save_config_and_close_active_timer(workspace, monkeypatch):
+    app, home, path = workspace
+    window = home.project_window
+    select(window, "server", "s7")
+    pane = window._panes["s7"][2]
+    errors = []
+
+    def configure_rule(editor):
+        editor.kind.setCurrentIndex(editor.kind.findData(RuleKind.TIMELINE.value))
+        editor.actions.setPlainText("0 = 65536")
+        editor.accept()
+        errors.append(editor.error.text())
+        editor.actions.setPlainText("0 = 800\n60000 = 850")
+        editor.accept()
+        return editor.result()
+
+    def configure_scene(dialog):
+        dialog.edit.click()
+        return dialog.result()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(RuleDialog, "exec", configure_rule)
+        patch.setattr(SimulationDialog, "exec", configure_scene)
+        pane.scene_button.click()
+    assert errors and "范围" in errors[0]
+    assert pane.dirty.text() == "有未保存修改"
+    assert home._save_project()
+    saved_rule = ProjectFile().open(path).s7.points[0].simulation
+    assert saved_rule.kind == RuleKind.TIMELINE and saved_rule.actions[0].value == 800
+
+    window.server_view.setCurrentIndex(1)
+    pane.listen.click()
+    wait_for(lambda: pane.simulation_update is not None)
+    dialog = SimulationDialog(pane)
+    dialog.show()
+    assert dialog.start.isEnabled() and not dialog.edit.isEnabled()
+    dialog.start.click()
+    wait_for(lambda: pane.simulation_update.state == SimulationState.RUNNING)
+    point = pane.configuration_plan().points[0]
+    assert pane._memory.current(point) == 800
+    dialog.pause.click()
+    wait_for(lambda: pane.simulation_update.state == SimulationState.PAUSED)
+    dialog.reset.click()
+    wait_for(lambda: pane.simulation_update.state == SimulationState.READY)
+    assert pane._memory.current(point) == point.initial
+    dialog.start.click()
+    wait_for(lambda: pane.simulation_update.state == SimulationState.RUNNING)
+    task = pane.bridge.session._simulation_task
+    dialog.close()
+    dialog.deleteLater()
+
+    def confirm_close():
+        prompt = app.activeModalWidget()
+        next(button for button in prompt.buttons() if prompt.buttonRole(button) == QMessageBox.ButtonRole.AcceptRole).click()
+
+    QTimer.singleShot(0, confirm_close)
+    window.close()
+    wait_for(lambda: home.project_window is None)
+    assert task.done() and not pane.bridge._thread.is_alive()

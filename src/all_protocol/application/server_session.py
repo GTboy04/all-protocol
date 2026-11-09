@@ -1,22 +1,28 @@
 import asyncio
 from collections.abc import Callable
 from datetime import datetime
+from time import monotonic
 
 from .contracts import Value
 from .server_contracts import (
     LifecycleAction, ListenerState, ListenerUpdate, RequestMetadata, RuntimeChange,
     ServerAdapter, ServerCallbacks, ServerCapability, ServerEvent, ServerLifecycle, ServerRegistration,
 )
+from .simulation import TICK_SECONDS, Simulation, SimulationCommand, SimulationState, WriteSpan
 
 
 class ServerSession:
-    def __init__(self, emit: Callable[[ServerEvent], None], registration: ServerRegistration):
+    def __init__(self, emit: Callable[[ServerEvent], None], registration: ServerRegistration, *, clock=monotonic):
         self._emit = emit
         self._registration = registration
         self._adapter: ServerAdapter | None = None
         self._state = ListenerState.STOPPED
         self._endpoint = ""
         self._lifecycle = asyncio.Lock()
+        self._clock = clock
+        self._simulation: Simulation | None = None
+        self._simulation_task: asyncio.Task | None = None
+        self._simulating_write = False
 
     def _publish(self, payload, time: datetime | None = None):
         self._emit(ServerEvent(self._registration.key, self._endpoint, time or datetime.now(), payload))
@@ -31,10 +37,35 @@ class ServerSession:
     def _changed(self, details: object):
         self._publish(RuntimeChange(details))
 
+    def _written(self, span: WriteSpan):
+        if self._simulation is not None and not self._simulating_write and self._simulation.take_over(span):
+            self._publish(self._simulation.snapshot())
+
+    def _write_simulated(self, target, value):
+        self._simulating_write = True
+        try:
+            self._write_current(target, value)
+        finally:
+            self._simulating_write = False
+
+    async def _run_simulation(self, simulation):
+        while True:
+            await asyncio.sleep(TICK_SECONDS)
+            if simulation.tick():
+                self._publish(simulation.snapshot())
+
+    async def _cancel_simulation_task(self):
+        task, self._simulation_task = self._simulation_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def _shutdown(self):
+        await self._cancel_simulation_task()
         if self._adapter is not None:
             await self._adapter.shutdown()
             self._adapter = None
+        self._simulation = None
 
     async def start(self, plan: object):
         async with self._lifecycle:
@@ -44,9 +75,12 @@ class ServerSession:
             try:
                 await self._shutdown()
                 self._endpoint = ""
-                adapter = self._registration.create_adapter(plan, ServerCallbacks(self._request, self._changed))
+                adapter = self._registration.create_adapter(plan, ServerCallbacks(self._request, self._changed, self._written))
                 self._endpoint = adapter.endpoint
                 adapter.validate_plan()
+                points = self._registration.simulation_points
+                if points is not None and (configured := tuple(points(plan))):
+                    self._simulation = Simulation(configured, self._clock, self._write_simulated)
                 self._adapter = adapter
                 await adapter.bind()
             except (Exception, asyncio.CancelledError) as error:
@@ -65,6 +99,8 @@ class ServerSession:
                 return
             self._publish(ServerLifecycle(LifecycleAction.STARTED, f"启动监听 · {self._endpoint}"))
             self._update(ListenerState.LISTENING)
+            if self._simulation is not None:
+                self._publish(self._simulation.snapshot())
 
     async def stop(self):
         async with self._lifecycle:
@@ -72,10 +108,14 @@ class ServerSession:
                 return
             previous = self._state
             self._update(ListenerState.STOPPING)
+            if self._simulation is not None:
+                self._simulation.command(SimulationCommand.PAUSE)
             try:
                 await self._shutdown()
             except (Exception, asyncio.CancelledError) as error:
                 self._update(previous, f"停止失败 · {error}")
+                if self._simulation is not None:
+                    self._publish(self._simulation.snapshot())
                 raise
             self._publish(ServerLifecycle(LifecycleAction.STOPPED, "已停止监听"))
             self._update(ListenerState.STOPPED)
@@ -91,11 +131,28 @@ class ServerSession:
     async def read_current(self, target: object) -> Value:
         return self._active_adapter(ServerCapability.READ_CURRENT).read_current(target)
 
-    async def write_current(self, target: object, value: Value):
+    def _write_current(self, target: object, value: Value):
         self._active_adapter(ServerCapability.WRITE_CURRENT).write_current(target, value)
+
+    async def write_current(self, target: object, value: Value):
+        self._write_current(target, value)
 
     async def edit_current(self, target: object, value: Value):
         try:
             await self.write_current(target, value)
         except ValueError as error:
             self._update(self._state, str(error))
+
+    async def control_simulation(self, command: SimulationCommand, target=None):
+        simulation = self._simulation
+        if self._state != ListenerState.LISTENING or simulation is None:
+            return
+        simulation.command(command, target)
+        if simulation.state == SimulationState.RUNNING:
+            simulation.tick()
+            if self._simulation_task is None:
+                self._simulation_task = asyncio.create_task(self._run_simulation(simulation))
+            self._publish(simulation.snapshot())
+        else:
+            self._publish(simulation.snapshot())
+            await self._cancel_simulation_task()

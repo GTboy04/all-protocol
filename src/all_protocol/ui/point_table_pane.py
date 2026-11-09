@@ -15,7 +15,7 @@ from ..point_tables import (
 )
 from ..storage import _replace_file
 from .main_window import Rows, _table
-from .server_pane import EditDialog
+from .widgets import EditDialog
 from .widgets import spinbox
 
 

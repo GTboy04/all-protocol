@@ -1,6 +1,7 @@
 from ...application.contracts import Value
 from ...application.server_contracts import RequestMetadata, ServerCallbacks
-from .server import ServerRequest, TcpServer
+from ...application.simulation import WriteSpan
+from .server import ServerRequest, TcpServer, ValuesChanged
 from .server_model import ModbusServerTarget, ServerPlan
 
 
@@ -25,8 +26,14 @@ class ModbusServerAdapter:
                    ("offset", request.offset), ("count", request.count))
         self._callbacks.request(request.time, RequestMetadata(request.peer, request.result, request.rx, request.tx, details))
 
+    def _changed(self, change: ValuesChanged):
+        self._callbacks.changed(change)
+        if self._callbacks.written is not None:
+            self._callbacks.written(WriteSpan((change.unit_id, change.area), change.offset,
+                                              change.offset + len(change.values)))
+
     async def bind(self):
-        self._server = TcpServer(self._plan, self._callbacks.changed, self._record)
+        self._server = TcpServer(self._plan, self._changed, self._record)
         await self._server.bind()
 
     async def shutdown(self):

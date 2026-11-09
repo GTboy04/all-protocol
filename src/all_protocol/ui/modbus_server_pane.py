@@ -12,8 +12,8 @@ from ..adapters.modbus_tcp.values import DataType, RegisterOrder
 from ..application.server_contracts import ListenerState, RequestMetadata, ServerEvent
 from .main_window import Rows, _heading, _panel, _table
 from .modbus_tcp_form import order_picker
-from .server_pane import EditDialog, ServerPane
-from .widgets import spinbox
+from .server_pane import ServerPane
+from .widgets import EditDialog, spinbox
 
 
 def _display(value):
@@ -126,6 +126,19 @@ class ModbusServerPane(ServerPane):
     def _plan(self):
         return ServerPlan(self.host.text().strip(), self.port.value(), self._stations)
 
+    def set_simulation_rule(self, target, rule):
+        index = self.point_table.currentIndex()
+        stations = list(self._stations)
+        row = next(i for i, station in enumerate(stations) if station.unit_id == target.unit_id)
+        station = stations[row]
+        points = tuple(replace(point, simulation=rule) if (point.area, point.offset) == (target.area, target.offset)
+                       else point for point in station.points)
+        stations[row] = replace(station, points=points)
+        self._stations = tuple(stations)
+        self._show_points()
+        if index.isValid():
+            self.point_table.selectRow(index.row())
+
     @property
     def _station(self):
         row = self.station_list.currentRow()
@@ -232,8 +245,10 @@ class ModbusServerPane(ServerPane):
                 area, offset.value(), count.value(), get_initial(), "" if batch else name.text().strip(),
                 selected_type(), RegisterOrder(order.currentData()))
             if original is not None:
-                edited = updated.points[-1]
+                edited = replace(updated.points[-1], simulation=original.simulation)
                 updated = replace(updated, points=tuple(edited if p is original else p for p in station.points))
+                if edited.simulation is not None:
+                    replace(self._saved_plan, stations=(updated,)).validate()
             self._replace_station(updated)
             self.point_table.selectRow(self._point_rows[offset.value()])
 

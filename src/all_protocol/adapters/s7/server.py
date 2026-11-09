@@ -315,9 +315,11 @@ class S7Server:
             previous = self._memory.read(area, item.db, item.offset, item.size)
         except KeyError:
             return OUT_OF_RANGE
+        mask = 0xFF
         if item.bit_access:
-            data = bytes(((previous[0] & ~(1 << item.bit)) | (data[0] << item.bit),))
-        change = S7ValuesChanged(area, item.db, item.offset, data)
+            mask = 1 << item.bit
+            data = bytes(((previous[0] & ~mask) | (data[0] << item.bit),))
+        change = S7ValuesChanged(area, item.db, item.offset, data, mask)
         self._memory.apply(change)
         self._changed(change)
         return SUCCESS

@@ -1,6 +1,7 @@
 from dataclasses import dataclass, replace
 
 from ...application.contracts import Value
+from ...application.simulation import SimulationPoint, SimulationRule, WriteSpan, compile_rule
 from .model import Area, data_types
 from .values import DataType, RegisterOrder
 
@@ -20,6 +21,7 @@ class ServerPoint:
     name: str = ""
     data_type: DataType | None = None
     order: RegisterOrder = RegisterOrder.BIG
+    simulation: SimulationRule | None = None
 
     @property
     def value_type(self) -> DataType:
@@ -106,3 +108,17 @@ class ServerPlan:
             seen.add(station.unit_id)
         if starting and not any(station.points for station in self.stations):
             raise ValueError("启动前请至少配置一个从站和一个点位")
+        for point in self.simulation_points(configured_only=True):
+            compile_rule(point, point.rule)
+
+    def simulation_points(self, *, configured_only=False):
+        for station in self.stations:
+            for point in station.points:
+                if configured_only and point.simulation is None:
+                    continue
+                target = ModbusServerTarget(station.unit_id, point.area, point.offset)
+                address = f"Unit {station.unit_id} / {point.area} / {point.offset}"
+                span = WriteSpan((station.unit_id, point.area), point.offset, point.addresses.stop)
+                label = f"{point.name} · {address}" if point.name else address
+                yield SimulationPoint(target, label, point.initial, point.encode, span, point.value_type.floating,
+                                      point.value_type == DataType.BOOL, point.simulation)
