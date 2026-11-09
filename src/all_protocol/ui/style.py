@@ -50,6 +50,14 @@ QListWidget#serverStations:focus { border-color: #0f6570; }
 QListWidget#serverStations::item { padding: 5px 7px; }
 QListWidget#serverStations::item:selected { background: #d2e9ed; color: #123b48; }
 QFrame#panel { background: #ffffff; border: 1px solid #d4dfe8; border-radius: 7px; }
+QTreeWidget#projectTree {
+    background: #f5f8fb;
+    border: 1px solid #d4dfe8;
+    selection-background-color: #d2e9ed;
+    selection-color: #123b48;
+}
+QTreeWidget#projectTree:focus { border-color: #0f6570; }
+QTreeWidget#projectTree::item { padding: 4px 0; }
 QLabel#sectionTitle { font-size: 15px; font-weight: bold; }
 QLabel#fieldLabel { color: #405970; }
 QLabel#resultContext { color: #455f75; }

@@ -56,12 +56,41 @@ class ProjectDevice:
 
 
 @dataclass(frozen=True)
+class WorkspaceLayout:
+    """Splitter positions in thousandths; no window coordinates or runtime state."""
+
+    navigation: int = 220
+    journal: int = 290
+    journal_visible: bool = True
+    selection: tuple[str, str] = ("", "")
+    server_values: bool = False
+    navigation_visible: bool = True
+
+    @classmethod
+    def decode(cls, raw):
+        if not isinstance(raw, dict) or type(raw.get("version")) is not int or raw["version"] != 1:
+            return None
+        navigation, journal = raw.get("navigation"), raw.get("journal")
+        visible, values = raw.get("journal_visible"), raw.get("server_values")
+        navigation_visible = raw.get("navigation_visible")
+        selection = raw.get("selection")
+        if (any(type(size) is not int or not 100 <= size <= 850 for size in (navigation, journal))
+                or any(type(flag) is not bool for flag in (visible, values, navigation_visible))
+                or not isinstance(selection, list) or len(selection) != 2
+                or not all(isinstance(part, str) for part in selection)
+                or selection[0] not in ("", "device", "points", "table", "server")):
+            return None
+        return cls(navigation, journal, visible, tuple(selection), values, navigation_visible)
+
+
+@dataclass(frozen=True)
 class Project:
     name: str
     devices: tuple[ProjectDevice, ...] = ()
     modbus: ServerPlan = field(default_factory=ServerPlan)
     s7: S7ServerPlan = field(default_factory=S7ServerPlan)
     point_tables: tuple[PointTable, ...] = ()
+    layout: WorkspaceLayout | None = None
 
     def remember(self, profile: ConnectionProfile) -> "Project":
         validate_profile(profile)
@@ -91,12 +120,15 @@ def project_record(project: Project) -> dict:
     ]
     s7 = {"schema_version": 1, "protocol": "s7", **asdict(project.s7)}
     s7["points"] = [asdict(point) for point in project.s7.points]
-    return {
+    record = {
         "format": "all-protocol-project", "schema_version": 3, "name": project.name,
         "devices": [asdict(item) for item in project.devices],
         "servers": {"modbus-tcp": modbus, "s7": s7},
         "point_tables": [table_record(table) for table in project.point_tables],
     }
+    if project.layout is not None:
+        record["workspace_layout"] = {"version": 1, **asdict(project.layout), "selection": list(project.layout.selection)}
+    return record
 
 
 def decode_project(data) -> Project:
@@ -159,7 +191,7 @@ def decode_project(data) -> Project:
                 tables.append(table)
             except (KeyError, TypeError, ValueError) as error:
                 raise ValueError(f"point_tables[{index}]：{error}") from error
-        return Project(name, tuple(devices), *plans, tuple(tables))
+        return Project(name, tuple(devices), *plans, tuple(tables), WorkspaceLayout.decode(data.get("workspace_layout")))
     except (KeyError, TypeError, ClientError) as error:
         raise ValueError(f"项目字段无效：{error}") from error
 

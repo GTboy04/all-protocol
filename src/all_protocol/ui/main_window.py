@@ -3,7 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSignalBlocker, Qt
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSignalBlocker, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import (
     QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
@@ -141,12 +141,16 @@ def _journal_row(entry: JournalEntry) -> tuple[str, ...]:
 
 
 class MainWindow(QMainWindow):
+    workspace_changed = Signal()
+    stopped = Signal()
+
     def __init__(self, bridge: IoBridge, protocols: tuple[DesktopProtocol, ...],
-                 history: LocalHistory | None = None, return_home: Callable[[], None] | None = None):
+                 history: LocalHistory | None = None, return_home: Callable[[], None] | None = None,
+                 *, embedded=False):
         super().__init__()
         self.setWindowTitle("工业协议调试台 · 客户端")
         self.resize(1120, 800)
-        self.setMinimumWidth(640)
+        self.setMinimumWidth(0 if embedded else 640)
         self._bridge = bridge
         self._managed = isinstance(bridge.session, SessionManager)
         self._active_device_id = None
@@ -164,6 +168,7 @@ class MainWindow(QMainWindow):
         self._history = history
         self._project_mode = bool(getattr(history, "project_mode", False))
         self._return_home = return_home
+        self._embedded = embedded
         self.before_close: Callable[[], bool] | None = None
         self._profiles: tuple[ConnectionProfile, ...] = ()
         self._protocols = protocols
@@ -319,13 +324,35 @@ class MainWindow(QMainWindow):
             self._last_read = update
             self.results.reset(self._quick_values.get(self._active_device_id, ()))
 
+    def workspace_device_status(self, device_id):
+        return self._device_states.get(device_id, SessionState()).connection, self._device_errors.get(device_id, "")
+
+    def select_workspace_device(self, device_id, *, points=False, table_id=None):
+        if device_id != self._active_device_id:
+            device = next((item for item in self._history.workspace.project.devices if item.id == device_id), None)
+            if device is None or device_id in self._pending_removals:
+                return False
+            if self._history.profiles() != self._profiles:
+                self._sync_profiles()
+            index = next((i for i in range(self.recent_connections.count())
+                          if self.recent_connections.itemData(i).key == device.profile.key), -1)
+            if index < 0 or not self._select_profile(index):
+                return False
+        if table_id is not None:
+            index = self.point_table_pane.tables.findData(table_id)
+            if index < 0:
+                return False
+            self.point_table_pane.tables.setCurrentIndex(index)
+        self.point_views.setCurrentIndex(int(points))
+        return True
+
     def _build(self):
         root = QWidget()
         root.setObjectName("workspace")
         layout = QVBoxLayout(root)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        masthead = QFrame()
+        masthead = QFrame(root)
         masthead.setObjectName("masthead")
         header = QHBoxLayout(masthead)
         header.setContentsMargins(18, 9, 18, 9)
@@ -343,7 +370,10 @@ class MainWindow(QMainWindow):
         title.setObjectName("title")
         header.addWidget(title, 1)
         header.addWidget(self.connection_status)
-        layout.addWidget(masthead)
+        if self._embedded:
+            masthead.hide()
+        else:
+            layout.addWidget(masthead)
 
         body = QVBoxLayout()
         body.setContentsMargins(16, 12, 16, 12)
@@ -352,8 +382,13 @@ class MainWindow(QMainWindow):
 
         connection, connection_layout = _panel()
         connection_header = QHBoxLayout()
-        connection_header.addWidget(_heading("设备连接"), 1)
-        if self._history is not None:
+        connection_header.addWidget(_heading("设备连接"), 0 if self._embedded else 1)
+        if self._embedded:
+            connection_header.addWidget(self.connection_status)
+            connection_header.addWidget(self.delete_recent_button)
+            connection_header.addStretch()
+            self.recent_connections.hide()
+        elif self._history is not None:
             recent_label = QLabel("项目设备" if self._project_mode else "最近连接")
             recent_label.setObjectName("fieldLabel")
             recent_label.setBuddy(self.recent_connections)
@@ -365,10 +400,13 @@ class MainWindow(QMainWindow):
         settings.setSpacing(10)
         add_field(settings, "协议", self.protocol)
         settings.addWidget(self.connection_forms, 1)
-        settings.addWidget(self.connection_button, alignment=Qt.AlignmentFlag.AlignBottom)
+        if not self._embedded:
+            settings.addWidget(self.connection_button, alignment=Qt.AlignmentFlag.AlignBottom)
         connection_layout.addLayout(settings)
         if self._managed:
             controls = QHBoxLayout()
+            if self._embedded:
+                controls.addWidget(self.connection_button)
             self.new_device_button = QPushButton("新增设备")
             self.connect_all_button = QPushButton("连接全部")
             self.disconnect_all_button = QPushButton("断开全部")
@@ -381,7 +419,10 @@ class MainWindow(QMainWindow):
             self.batch_status.setTextFormat(Qt.TextFormat.PlainText)
             controls.addWidget(self.batch_status, 1)
             self.overview = QLabel()
-            controls.addWidget(self.overview)
+            if self._embedded:
+                self.overview.hide()
+            else:
+                controls.addWidget(self.overview)
             connection_layout.addLayout(controls)
         body.addWidget(connection)
 
@@ -420,24 +461,28 @@ class MainWindow(QMainWindow):
                 self._history.workspace, self._table_device,
                 lambda: self._protocols[self.protocol.currentIndex()].create_form,
                 self._save_table_device, self._read_table, self._write_point, lambda: self._registration.writable,
-                self._poll_table, self._stop_all_polling,
+                self._poll_table, self._stop_all_polling, embedded=self._embedded,
             )
             self.point_views = QTabWidget()
             self.point_views.setAccessibleName("点位视图")
             self.point_views.addTab(quick, "快速读写")
             self.point_views.addTab(self.point_table_pane, "点表")
             content = self.point_views
-        journal, journal_layout = _panel()
-        journal_layout.addWidget(_heading("请求日志"))
+        self.journal_panel, journal_layout = _panel()
+        if not self._embedded:
+            journal_layout.addWidget(_heading("请求日志"))
         journal_layout.addWidget(self.log_table)
         journal_layout.addWidget(self.detail)
-        split = QSplitter(Qt.Orientation.Vertical)
-        split.addWidget(content)
-        split.addWidget(journal)
-        split.setChildrenCollapsible(False)
-        split.setHandleWidth(8)
-        split.setSizes([350, 260])
-        body.addWidget(split, 1)
+        if self._embedded:
+            body.addWidget(content, 1)
+        else:
+            split = QSplitter(Qt.Orientation.Vertical)
+            split.addWidget(content)
+            split.addWidget(self.journal_panel)
+            split.setChildrenCollapsible(False)
+            split.setHandleWidth(8)
+            split.setSizes([350, 260])
+            body.addWidget(split, 1)
         self.setCentralWidget(root)
 
     def _history_failure(self, message: str):
@@ -476,11 +521,11 @@ class MainWindow(QMainWindow):
     def _select_profile(self, index: int):
         profile = self.recent_connections.itemData(index)
         if profile is None:
-            return
+            return False
         if self._project_mode and self.before_close is not None:
             if not self.before_close():
-                self.recent_connections.setCurrentIndex(-1)
-                return
+                self._sync_profiles()
+                return False
             key = profile.key
             profiles = self._history.profiles()
             self._show_profiles(profiles)
@@ -499,7 +544,7 @@ class MainWindow(QMainWindow):
         except (ClientError, KeyError, ValueError):
             self._history_failure("无法恢复此连接记录，请检查配置")
             self._refresh()
-            return
+            return False
         self.protocol.setCurrentIndex(protocol_index)
         self.interval.setValue(profile.interval_ms)
         self._query_changed()
@@ -507,6 +552,15 @@ class MainWindow(QMainWindow):
             self._restore_device_read()
             self._show_device_journal()
             self._refresh()
+        return True
+
+    def _sync_profiles(self):
+        self._show_profiles(self._history.profiles())
+        selected = next((device.profile.key for device in self._history.workspace.project.devices
+                         if device.id == self._active_device_id), None)
+        self.recent_connections.setCurrentIndex(next((i for i in range(self.recent_connections.count())
+            if self.recent_connections.itemData(i).key == selected), -1))
+        self._refresh()
 
     def _delete_profile(self):
         profile = self.recent_connections.currentData()
@@ -657,9 +711,12 @@ class MainWindow(QMainWindow):
             _, endpoint = self._form.connection_config()
             profile = ConnectionProfile(self._registration.key, endpoint, self._form.profile_fields(), self.interval.value())
             self._validate_runtime_config(profile)
-            self._show_profiles(self._history.remember(profile))
+            profiles = self._history.remember(profile)
             if self._managed:
                 self._bind_device(self._device_for_profile(profile).id)
+                self._sync_profiles()
+            else:
+                self._show_profiles(profiles)
         except (ClientError, ValueError) as error:
             self.point_table_pane.feedback.setText(str(error))
             return
@@ -829,8 +886,11 @@ class MainWindow(QMainWindow):
         state = self._device_states.get(device_id, SessionState(device_id=device_id))
         if isinstance(payload, JournalEntry):
             self._append_journal(payload)
-            if payload.operation == "连接":
-                self._device_errors[device_id] = payload.detail if payload.error else ""
+            if event.generation >= state.generation:
+                if payload.error:
+                    self._device_errors[device_id] = payload.detail or payload.outcome
+                elif payload.operation in ("连接", "读取", "写入", "断开"):
+                    self._device_errors.pop(device_id, None)
             if device_id == self._active_device_id and (payload.error or payload.operation == "写入"):
                 self.feedback.setText(f"{payload.outcome} · {payload.detail}" if payload.detail else payload.outcome)
         elif event.generation < state.generation:
@@ -979,10 +1039,18 @@ class MainWindow(QMainWindow):
             if self._active_device_id is not None:
                 self._device_states[self._active_device_id] = state
             self._refresh_device_labels()
+            self.workspace_changed.emit()
 
     def _io_stopped(self):
         self._stopped = True
-        self.close()
+        if not self._embedded:
+            self.close()
+        self.stopped.emit()
+
+    def shutdown_embedded(self):
+        self._closing = True
+        self._refresh()
+        self._bridge.shutdown()
 
     def closeEvent(self, event: QCloseEvent):
         if self._stopped:

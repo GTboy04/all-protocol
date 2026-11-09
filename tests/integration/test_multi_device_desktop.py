@@ -100,7 +100,7 @@ def devices(monkeypatch, tmp_path):
     monkeypatch.setattr(home, "_project_error", lambda error: errors.append(str(error)))
     home.show()
     home._open_client()
-    window = home._workbenches["client"][0]
+    window = home.project_window.client
     yield app, home, window, workspace, clients, read_failures, connect_failures, threads, errors
     home.join()
     app.processEvents()
@@ -189,17 +189,22 @@ def test_timeout_isolation_disconnect_all_and_old_read_generation(devices):
 
 
 def test_batch_failure_is_visible_and_manual_retry_is_independent(devices):
-    _app, _home, window, _workspace, clients, _read_failures, connect_failures, _threads, _errors = devices
+    _app, home, window, _workspace, clients, _read_failures, connect_failures, _threads, _errors = devices
+    project = home.project_window
     connect_failures.add("192.0.2.2")
     window.connect_all_button.click()
     wait_for(lambda: "失败 1" in window.batch_status.text())
     assert window._device_states["mb"].connection == ConnectionState.ONLINE
     assert window._device_states["s7"].connection == ConnectionState.OFFLINE
     assert "模拟连接失败" in window.batch_status.toolTip()
-    choose(window, "s7")
+    wait_for(lambda: project.error_button.text() == "异常 1")
+    project.error_button.click()
+    assert project.tree.currentItem().data(0, Qt.ItemDataRole.UserRole) == ("device", "s7")
+    assert "模拟连接失败" in project.tree.currentItem().toolTip(0)
     connect_failures.clear()
     window.connection_button.click()
     wait_for(lambda: window._state.connection == ConnectionState.ONLINE)
+    wait_for(lambda: project.error_button.text() == "异常 0")
     assert window._device_states["mb"].generation == 1 and window._state.generation == 2
     assert len(clients) == 3
 
@@ -239,12 +244,17 @@ def test_closing_workbench_drains_all_clients_before_thread_stops(devices):
     app, home, window, _workspace, clients, _read_failures, _connect_failures, _threads, _errors = devices
     start_both(window)
     bridge = window._bridge
-    window.close()
+    def discard():
+        dialog = app.activeModalWidget()
+        next(button for button in dialog.buttons() if dialog.buttonRole(button) == QMessageBox.ButtonRole.DestructiveRole).click()
+
+    QTimer.singleShot(0, discard)
+    home.project_window.close()
     wait_for(lambda: not bridge._thread.is_alive())
     app.processEvents()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     assert all(client.closed == 1 for client in clients)
-    assert "client" not in home._workbenches
+    assert home.project_window is None
 
 
 def test_rejected_connection_restores_actual_state_instead_of_sticking_in_connecting(devices):

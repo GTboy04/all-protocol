@@ -73,6 +73,7 @@ class S7ServerPane(ServerPane):
         self.remove_point = self._button(actions, "删除", self._delete_point)
         actions.addStretch()
         self.edit_value = self._button(actions, "修改当前值", self._edit_current)
+        self.plan_controls = (self.save, self.add_point, self.edit_point, self.remove_point)
         layout.addLayout(actions)
         journal = self._journal_panel(("时间", "来源客户端", "功能码", "目标", "结果"), _request_row,
                                       monospace=(1, 2, 3))

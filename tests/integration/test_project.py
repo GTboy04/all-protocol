@@ -11,7 +11,7 @@ from all_protocol.adapters.modbus_tcp.values import DataType, RegisterOrder
 from all_protocol.adapters.s7.model import Area as S7Area, DataType as S7DataType, S7Target
 from all_protocol.adapters.s7.server_model import S7ServerPlan, S7ServerPoint
 from all_protocol.project import (
-    Project, ProjectFile, ProjectHistory, ProjectServerStorage, ProjectWorkspace,
+    Project, ProjectFile, ProjectHistory, ProjectServerStorage, ProjectWorkspace, WorkspaceLayout,
     decode_project, project_record,
 )
 from all_protocol.storage import ConnectionProfile, LocalHistory, ServerStorage, S7ServerStorage
@@ -54,6 +54,22 @@ def test_project_round_trip_is_portable_and_keeps_stable_ids(tmp_path):
     record = json.loads(path.read_bytes())
     assert set(record) == {"format", "schema_version", "name", "devices", "servers", "point_tables"}
     assert "packets" not in path.read_text(encoding="utf-8")
+
+
+def test_optional_layout_round_trips_and_damaged_layout_leaves_protocol_configuration_usable(tmp_path):
+    project = sample_project()
+    layout = WorkspaceLayout(315, 440, False, ("server", "s7"), True, False)
+    path = tmp_path / "layout.json"
+    ProjectFile().save(replace(project, layout=layout), path)
+    assert ProjectFile().open(path) == replace(project, layout=layout)
+    record = json.loads(path.read_bytes())
+    assert record["schema_version"] == 3 and record["workspace_layout"]["version"] == 1
+    for field, value in (("version", 99), ("navigation", -1), ("journal", True),
+                         ("selection", ["unknown", "s7"]), ("journal_visible", 1)):
+        invalid = deepcopy(record)
+        invalid["workspace_layout"][field] = value
+        path.write_text(json.dumps(invalid), encoding="utf-8")
+        assert ProjectFile().open(path) == project
 
 
 @pytest.mark.parametrize("mutation", [

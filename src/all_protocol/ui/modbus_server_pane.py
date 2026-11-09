@@ -96,6 +96,8 @@ class ModbusServerPane(ServerPane):
         self.remove_point = self._button(point_actions, "删除", self._delete_point)
         point_actions.addStretch()
         self.edit_value = self._button(point_actions, "修改当前值", self._edit_current)
+        self.plan_controls = (self.save, self.add_station, self.edit_station, self.remove_station,
+                              self.add_point, self.batch_points, self.edit_point, self.remove_point)
         point_layout.addLayout(point_actions)
         config = QSplitter(Qt.Orientation.Horizontal)
         config.addWidget(station_panel)

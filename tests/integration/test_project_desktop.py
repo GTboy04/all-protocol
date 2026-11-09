@@ -34,11 +34,6 @@ def desktop(monkeypatch, tmp_path):
     monkeypatch.setattr(home, "_project_error", lambda error: errors.append(str(error)))
     home.show()
     yield app, home, errors
-    server = home._workbenches.get("server")
-    if server is not None:
-        for index in range(2):
-            pane = server[0].tabs.widget(index)
-            pane._saved_plan = pane._plan()
     home.join()
     app.processEvents()
     home.workspace = None
@@ -51,10 +46,10 @@ def destroy_closed(app, home):
     for _ in range(30):
         app.processEvents()
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-        if not home._workbenches:
+        if home.project_window is None:
             return
         QTest.qWait(10)
-    assert not home._workbenches
+    assert home.project_window is None
 
 
 def choose_button(app, role):
@@ -69,7 +64,7 @@ def test_create_save_open_dual_protocol_project_without_network(desktop, monkeyp
     home.project_buttons["新建项目"].click()
     assert home.workspace.project.name == "工厂联调"
     home._open_client()
-    client = home._workbenches["client"][0]
+    client = home.project_window.client
     client._form.connection.host.setText("192.0.2.1")
     client._form.query.offset.setValue(10)
     client.interval.setValue(750)
@@ -79,7 +74,7 @@ def test_create_save_open_dual_protocol_project_without_network(desktop, monkeyp
     client._form.connection.slot.setValue(3)
     client.interval.setValue(1500)
     home._open_server()
-    server = home._workbenches["server"][0]
+    server = home.project_window.servers
     server.tabs.widget(1).port.setValue(2502)
     s7 = server.tabs.widget(0)
     s7.port.setValue(2102)
@@ -99,14 +94,13 @@ def test_create_save_open_dual_protocol_project_without_network(desktop, monkeyp
     assert not (home._data_dir / "modbus-tcp-server.json").exists()
     assert not (home._data_dir / "s7-server.json").exists()
     assert client._state.connection == ConnectionState.OFFLINE
-    client.close()
-    server.close()
+    home.project_window.close()
     destroy_closed(app, home)
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *_args: (str(path), ""))
     home.project_buttons["打开项目…"].click()
     assert home.workspace.project == project
     home._open_client()
-    restored = home._workbenches["client"][0]
+    restored = home.project_window.client
     assert restored.recent_connections.count() == 2
     assert restored._state.connection == ConnectionState.OFFLINE
     assert restored._form.connection.host.text() == "192.0.2.1"
@@ -114,7 +108,7 @@ def test_create_save_open_dual_protocol_project_without_network(desktop, monkeyp
     assert restored._form.connection.host.text() == "192.0.2.2"
     assert restored.interval.value() == 1500
     home._open_server()
-    restored_server = home._workbenches["server"][0]
+    restored_server = home.project_window.servers
     assert restored_server.tabs.widget(1).port.value() == 2502
     assert restored_server.tabs.widget(0)._points[0].initial == 123
     assert all(restored_server.tabs.widget(index).state == ListenerState.STOPPED for index in range(2))
@@ -131,7 +125,8 @@ def test_unsaved_cancel_failed_open_and_switch_guard_preserve_project(desktop, m
     home._open_client()
     home._local_mode()
     assert home.workspace is old and "先关闭" in errors[-1]
-    home._workbenches["client"][0].close()
+    QTimer.singleShot(0, lambda: choose_button(app, QMessageBox.ButtonRole.DestructiveRole))
+    home.project_window.close()
     destroy_closed(app, home)
     invalid = tmp_path / "invalid.json"
     invalid.write_text("{", encoding="utf-8")
@@ -152,7 +147,7 @@ def test_save_cancel_and_failure_leave_current_path_and_dirty_state(desktop, mon
     path = tmp_path / "good.json"
     home.workspace.file.save(home.workspace.project, path)
     home._open_client()
-    client = home._workbenches["client"][0]
+    client = home.project_window.client
     client._form.connection.host.setText("bad host")
     assert not home._save_project()
     assert home.workspace.file.path == path
@@ -165,13 +160,16 @@ def test_closed_client_edits_survive_and_removed_device_is_not_readded(desktop, 
     app, home, errors = desktop
     home.workspace = ProjectWorkspace(Project("项目"))
     home._open_client()
-    client = home._workbenches["client"][0]
+    client = home.project_window.client
     client._form.connection.host.setText("192.0.2.1")
-    client.close()
+    save_path = tmp_path / "first.json"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(save_path), ""))
+    QTimer.singleShot(0, lambda: choose_button(app, QMessageBox.ButtonRole.AcceptRole))
+    home.project_window.close()
     destroy_closed(app, home)
     assert len(home.workspace.project.devices) == 1
     home._open_client()
-    client = home._workbenches["client"][0]
+    client = home.project_window.client
     QTimer.singleShot(0, lambda: choose_button(app, QMessageBox.ButtonRole.DestructiveRole))
     client.delete_recent_button.click()
     for _ in range(50):
@@ -182,7 +180,7 @@ def test_closed_client_edits_survive_and_removed_device_is_not_readded(desktop, 
     assert not home.workspace.project.devices
     path = tmp_path / "project.json"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(path), ""))
-    assert home._save_project()
+    assert home._save_project(save_as=True)
     assert not ProjectFile().open(path).devices
     assert not errors
 
@@ -207,7 +205,7 @@ def test_server_applied_plan_only_changes_project_memory(desktop):
     _app, home, errors = desktop
     home.workspace = ProjectWorkspace(Project("项目"))
     home._open_server()
-    pane = home._workbenches["server"][0].tabs.widget(0)
+    pane = home.project_window.servers.tabs.widget(0)
     pane.port.setValue(3502)
     pane.save.click()
     assert home.workspace.project.modbus == ServerPlan(port=3502)
@@ -216,19 +214,22 @@ def test_server_applied_plan_only_changes_project_memory(desktop):
     assert not errors
 
 
-def test_switching_project_devices_retains_unconnected_edits(desktop, tmp_path):
+def test_switching_project_devices_retains_unconnected_edits(desktop, monkeypatch, tmp_path):
     app, home, errors = desktop
     home.workspace = ProjectWorkspace(Project("项目"))
     home._open_client()
-    client = home._workbenches["client"][0]
+    client = home.project_window.client
     client._form.connection.host.setText("192.0.2.1")
     assert home._capture_client()
     client._form.connection.host.setText("192.0.2.2")
     assert home._capture_client()
-    client.close()
+    save_path = tmp_path / "first.json"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(save_path), ""))
+    QTimer.singleShot(0, lambda: choose_button(app, QMessageBox.ButtonRole.AcceptRole))
+    home.project_window.close()
     destroy_closed(app, home)
     home._open_client()
-    client = home._workbenches["client"][0]
+    client = home.project_window.client
     assert client._form.connection.host.text() == "192.0.2.2"
     client._form.query.offset.setValue(88)
     client.recent_connections.activated.emit(1)
@@ -246,9 +247,9 @@ def test_close_project_save_and_discard_paths(desktop, monkeypatch, tmp_path):
     app, home, errors = desktop
     home.workspace = ProjectWorkspace(Project("项目"))
     home._open_client()
-    home._workbenches["client"][0]._form.connection.host.setText("192.0.2.1")
+    home.project_window.client._form.connection.host.setText("192.0.2.1")
     home._open_server()
-    home._workbenches["server"][0].tabs.widget(0).port.setValue(4502)
+    home.project_window.servers.tabs.widget(0).port.setValue(4502)
     path = tmp_path / "saved.json"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(path), ""))
     QTimer.singleShot(0, lambda: choose_button(app, QMessageBox.ButtonRole.AcceptRole))

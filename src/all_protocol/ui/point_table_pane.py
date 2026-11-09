@@ -1,7 +1,7 @@
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QSignalBlocker, Qt, QTimer
+from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
     QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
@@ -141,13 +141,16 @@ class CsvEditDialog(QDialog):
 
 
 class PointTablePane(QWidget):
+    workspace_changed = Signal()
+
     def __init__(self, workspace, device, create_form, save_device, read_table, write_point, can_write,
-                 poll_table, stop_all):
+                 poll_table, stop_all, *, embedded=False):
         super().__init__()
         self.workspace, self.device, self.create_form = workspace, device, create_form
         self.save_device, self.read_table, self.write_point = save_device, read_table, write_point
         self.can_write = can_write
         self.poll_table, self.stop_all = poll_table, stop_all
+        self._embedded = embedded
         self.state = SessionState()
         self._context = None
         self._tables = ()
@@ -191,8 +194,11 @@ class PointTablePane(QWidget):
         polling.addWidget(self.stop_all_button)
         polling.addStretch()
         self.schedule_status = QLabel()
-        polling.addWidget(self.schedule_status)
         layout.addLayout(polling)
+        if embedded:
+            layout.addWidget(self.schedule_status)
+        else:
+            polling.addWidget(self.schedule_status)
         toolbar = QHBoxLayout()
         for label, slot in (("新增点位", self._add_point), ("编辑点位", self._edit_point),
                             ("删除点位", self._delete_point), ("批量编辑…", self._bulk_edit)):
@@ -206,6 +212,9 @@ class PointTablePane(QWidget):
         self.point_table = _table(self.rows)
         self.point_table.setAccessibleName("命名点位")
         layout.addWidget(self.point_table, 1)
+        self.empty = QLabel()
+        self.empty.setObjectName("resultContext")
+        layout.addWidget(self.empty)
         self.feedback = QLabel()
         self.feedback.setObjectName("warning")
         self.feedback.setTextFormat(Qt.TextFormat.PlainText)
@@ -290,7 +299,9 @@ class PointTablePane(QWidget):
                 self.tables.setCurrentIndex(max(0, self.tables.findData(selected)))
             self._show_points()
         if device:
-            text = device.profile.endpoint if device.name == device.profile.endpoint else f"{device.name} · {device.profile.endpoint}"
+            text = device.profile.endpoint
+            if not self._embedded and device.name != text:
+                text = f"{device.name} · {text}"
         else:
             text = "先填写设备连接参数，再保存设备配置并新建点表。"
         self.context.setText(text)
@@ -334,6 +345,8 @@ class PointTablePane(QWidget):
         selected = self.point.id if keep_selection and self.point else None
         points = self.table.points if self.table else ()
         self.rows.reset(points)
+        self.empty.setText("本表暂无点位，可点击「新增点位」。" if self.table else "暂无点表，可新建或导入。")
+        self.empty.setVisible(not points)
         if self.table:
             with QSignalBlocker(self.poll_interval), QSignalBlocker(self.stale_after):
                 self.poll_interval.setValue(self.table.interval_ms)
@@ -343,6 +356,7 @@ class PointTablePane(QWidget):
             if index is not None:
                 self.point_table.selectRow(index)
         self._buttons()
+        self.workspace_changed.emit()
 
     def _apply(self, table):
         self.workspace.project = self.workspace.project.with_table(table)

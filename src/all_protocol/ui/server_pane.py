@@ -50,6 +50,7 @@ class ServerPane(QWidget):
         self._saved_plan = default_plan
         self.state = ListenerState.STOPPED
         self.endpoint = ""
+        self.listener_error = ""
         self._load_error = False
 
     @property
@@ -98,7 +99,9 @@ class ServerPane(QWidget):
 
     def _journal_panel(self, headers, format_row, numbers=(), monospace=()):
         panel, layout = _panel()
-        layout.addWidget(_heading("请求日志"))
+        self.journal_heading = _heading("请求日志")
+        layout.addWidget(self.journal_heading)
+        self.journal_panel = panel
         self.requests = Rows(headers, format_row, numbers, monospace)
         table = _table(self.requests)
         table.setAccessibleName("请求日志")
@@ -115,6 +118,15 @@ class ServerPane(QWidget):
         split.setSizes([710, 350])
         layout.addWidget(split, 1)
         return panel
+
+    def show_workspace_values(self, current):
+        self.host.setReadOnly(current)
+        self.port.setReadOnly(current)
+        self.point_table.setColumnHidden(self.points.columnCount() - 2, current)
+        self.point_table.setColumnHidden(self.points.columnCount() - 1, not current)
+        for control in self.plan_controls:
+            control.setVisible(not current)
+        self.edit_value.setVisible(current)
 
     @staticmethod
     def _button(layout, title, slot):
@@ -173,6 +185,7 @@ class ServerPane(QWidget):
 
     def _toggle_listener(self):
         self._feedback("")
+        self.listener_error = ""
         session = self.bridge.session
         if self.state == ListenerState.STOPPED:
             plan = self._plan()
@@ -188,6 +201,7 @@ class ServerPane(QWidget):
         if isinstance(payload, ListenerUpdate):
             previous, self.state = self.state, payload.state
             self.endpoint = event.endpoint
+            self.listener_error = payload.error
             if payload.error:
                 self._feedback(payload.error)
             if previous != self.state:

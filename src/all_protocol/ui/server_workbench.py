@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QTabWidget, QVBoxLayout, QWidget
 
@@ -23,14 +23,18 @@ class DesktopServerProtocol:
 
 
 class ServerWorkbench(QMainWindow):
-    def __init__(self, return_home, protocols_and_storages):
+    overview_changed = Signal()
+    stopped = Signal()
+
+    def __init__(self, return_home, protocols_and_storages, *, embedded=False):
         super().__init__()
         self.setWindowTitle("工业协议调试台 · 服务端")
         self.resize(1120, 800)
-        self.setMinimumWidth(820)
+        self.setMinimumWidth(0 if embedded else 820)
         self._checking_close = False
         self._closing = False
         self._stopped = 0
+        self._embedded = embedded
         self._bridges = []
         self._protocols = []
         self._build(return_home)
@@ -62,13 +66,18 @@ class ServerWorkbench(QMainWindow):
         self.overview = QLabel()
         self.overview.setObjectName("connectionStatus")
         header.addWidget(self.overview)
-        layout.addWidget(masthead)
+        if self._embedded:
+            masthead.setParent(root)
+            masthead.hide()
+        else:
+            layout.addWidget(masthead)
         self.tabs = QTabWidget()
         self.tabs.setObjectName("serverProtocols")
         self.tabs.setAccessibleName("服务端协议")
         self.tabs.setDocumentMode(True)
         self.tabs.tabBar().setObjectName("serverProtocolTabs")
         self.tabs.tabBar().setExpanding(False)
+        self.tabs.tabBar().setVisible(not self._embedded)
         layout.addWidget(self.tabs, 1)
 
     def _add(self, protocol, storage):
@@ -101,6 +110,16 @@ class ServerWorkbench(QMainWindow):
             style = self.overview.style()
             style.unpolish(self.overview)
             style.polish(self.overview)
+        self.overview_changed.emit()
+
+    def panes(self):
+        return tuple((protocol.registration, self.tabs.widget(index)) for index, protocol in enumerate(self._protocols))
+
+    def mark_plans_saved(self):
+        for _, pane in self.panes():
+            pane._saved_plan = pane.configuration_plan()
+            pane._load_error = False
+            pane._refresh()
 
     def project_plans(self):
         return {protocol.project_field: self.tabs.widget(index).configuration_plan()
@@ -131,6 +150,11 @@ class ServerWorkbench(QMainWindow):
         for bridge in self._bridges:
             bridge.shutdown()
 
+    def shutdown_embedded(self):
+        self._shutdown()
+        if not self._bridges:
+            self.stopped.emit()
+
     def join(self):
         self._shutdown()
         for bridge in self._bridges:
@@ -139,7 +163,9 @@ class ServerWorkbench(QMainWindow):
     def _io_stopped(self):
         self._stopped += 1
         if self._stopped == len(self._bridges):
-            self.close()
+            if not self._embedded:
+                self.close()
+            self.stopped.emit()
 
     def closeEvent(self, event):
         if self._stopped == len(self._bridges):
