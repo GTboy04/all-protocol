@@ -64,6 +64,7 @@ def choose_button(app, role):
 
 def test_create_save_open_dual_protocol_project_without_network(desktop, monkeypatch, tmp_path):
     app, home, errors = desktop
+    home._server_protocols = home._server_protocols[::-1]
     monkeypatch.setattr(QInputDialog, "getText", lambda *_args: ("工厂联调", True))
     home.project_buttons["新建项目"].click()
     assert home.workspace.project.name == "工厂联调"
@@ -79,8 +80,8 @@ def test_create_save_open_dual_protocol_project_without_network(desktop, monkeyp
     client.interval.setValue(1500)
     home._open_server()
     server = home._workbenches["server"][0]
-    server.tabs.widget(0).port.setValue(2502)
-    s7 = server.tabs.widget(1)
+    server.tabs.widget(1).port.setValue(2502)
+    s7 = server.tabs.widget(0)
     s7.port.setValue(2102)
     s7._points = (replace(s7._points[0], initial=123, name="反馈"),)
     s7._memory = S7Memory(s7._points)
@@ -114,8 +115,8 @@ def test_create_save_open_dual_protocol_project_without_network(desktop, monkeyp
     assert restored.interval.value() == 1500
     home._open_server()
     restored_server = home._workbenches["server"][0]
-    assert restored_server.tabs.widget(0).port.value() == 2502
-    assert restored_server.tabs.widget(1)._points[0].initial == 123
+    assert restored_server.tabs.widget(1).port.value() == 2502
+    assert restored_server.tabs.widget(0)._points[0].initial == 123
     assert all(restored_server.tabs.widget(index).state == ListenerState.STOPPED for index in range(2))
     assert not errors
 

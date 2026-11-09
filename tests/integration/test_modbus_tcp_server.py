@@ -9,30 +9,33 @@ import pytest
 
 from all_protocol.adapters.modbus_tcp.client import ModbusTcpClient
 from all_protocol.adapters.modbus_tcp.model import Area, ModbusTarget, ModbusTcpConfig
-from all_protocol.adapters.modbus_tcp.server import ServerRequest, ValuesChanged
-from all_protocol.adapters.modbus_tcp.server_model import ServerPlan, ServerPoint, Station
+from all_protocol.adapters.modbus_tcp.server import ValuesChanged
+from all_protocol.adapters.modbus_tcp.server_model import ModbusServerTarget, ServerPlan, ServerPoint, Station
 from all_protocol.adapters.modbus_tcp.values import DataType, RegisterOrder
 from all_protocol.application.contracts import ClientEvents, ProtocolRegistration
-from all_protocol.application.server_session import ListenerState, ListenerUpdate, ServerSession
+from all_protocol.application.server_contracts import ListenerState, ListenerUpdate, RequestMetadata, RuntimeChange, ServerEvent
+from all_protocol.application.server_session import ServerSession
+from all_protocol.server_protocols import SERVER_PROTOCOLS
 from all_protocol.storage import ServerStorage
 
 
 def test_server_real_tcp_requests_and_restart():
     async def exercise():
         events = []
-        session = ServerSession(events.append)
+        session = ServerSession(events.append, SERVER_PROTOCOLS[0].registration)
         first = Station(1, points=(
             ServerPoint(Area.HR, 0, 1200), ServerPoint(Area.HR, 1, 7),
             ServerPoint(Area.HR, 65535, 65535), ServerPoint(Area.IR, 0, 23),
             ServerPoint(Area.COIL, 65535, 1), ServerPoint(Area.DI, 0, 0),
+            ServerPoint(Area.HR, 5, 0x12345678, data_type=DataType.UINT32, order=RegisterOrder.SWAP_WORDS),
         )).add_points(Area.COIL, 3, 9, 0)
         second = Station(255).add_points(Area.HR, 0, 1, 900)
         async with await asyncio.start_server(lambda *_: None, "127.0.0.1", 0) as occupied:
             port = occupied.sockets[0].getsockname()[1]
             plan = ServerPlan(port=port, stations=(first, second))
             await session.start(plan)
-            assert events[-1].state == ListenerState.STOPPED
-            assert events[-1].error
+            assert events[-1].payload.state == ListenerState.STOPPED
+            assert events[-1].payload.error
 
         def adu(tid, unit, pdu):
             return struct.pack(">HHHB", tid, 0, len(pdu) + 1, unit) + pdu
@@ -43,7 +46,9 @@ def test_server_real_tcp_requests_and_restart():
             return header + await asyncio.wait_for(reader.readexactly(length - 1), 2)
 
         await session.start(plan)
-        assert events[-1] == ListenerUpdate(ListenerState.LISTENING)
+        assert events[-1].payload == ListenerUpdate(ListenerState.LISTENING)
+        assert events[-1].protocol == "modbus-tcp"
+        assert events[-1].endpoint == f"{plan.host}:{plan.port}"
         reader, writer = await asyncio.open_connection(plan.host, plan.port)
         try:
             async def check(unit, request, expected):
@@ -53,8 +58,8 @@ def test_server_real_tcp_requests_and_restart():
                 writer.write(rx)
                 await writer.drain()
                 assert await receive(reader) == tx
-                entry = events[-1]
-                assert (entry.unit_id, entry.rx, entry.tx) == (unit, rx, tx)
+                entry = events[-1].payload
+                assert (dict(entry.details)["unit_id"], entry.rx, entry.tx) == (unit, rx, tx)
                 assert entry.peer.startswith("127.0.0.1:")
 
             # Send one request in fragments, followed by a batch larger than a TCP ADU.
@@ -62,7 +67,7 @@ def test_server_real_tcp_requests_and_restart():
             writer.write(rx[:5])
             await writer.drain()
             await asyncio.sleep(0.01)
-            assert isinstance(events[-1], ListenerUpdate)
+            assert isinstance(events[-1].payload, ListenerUpdate)
             writer.write(rx[5:] + b"".join(adu(tid, 255, rx[7:]) for tid in range(2, 52)))
             await writer.drain()
             assert await receive(reader) == adu(1, 1, bytes.fromhex("03 02 04b0"))
@@ -71,6 +76,10 @@ def test_server_real_tcp_requests_and_restart():
 
             await check(1, "03 ffff 0001", "03 02 ffff")
             await check(1, "03 ffff 0002", "83 02")
+            typed_point = ModbusServerTarget(1, Area.HR, 5)
+            assert await session.read_current(typed_point) == 0x12345678
+            await session.write_current(typed_point, 0xABCD1234)
+            await check(1, "03 0005 0002", "03 04 1234 abcd")
             await check(1, "01 ffff 0001", "01 01 01")
             await check(1, "05 ffff 0000", "05 ffff 0000")
             await check(1, "0f 0003 0009 02 55 01", "0f 0003 0009")
@@ -78,12 +87,16 @@ def test_server_real_tcp_requests_and_restart():
             await check(1, "01 0002 0002", "81 02")
             await check(1, "04 0000 0001", "04 02 0017")
             await check(1, "02 0000 0001", "02 01 00")
-            await session.set_current(1, Area.IR, 0, 42)
-            await session.set_current(1, Area.DI, 0, 1)
+            input_register = ModbusServerTarget(1, Area.IR, 0)
+            assert await session.read_current(input_register) == 23
+            await session.write_current(input_register, 42)
+            await session.write_current(ModbusServerTarget(1, Area.DI, 0), 1)
+            assert await session.read_current(input_register) == 42
             await check(1, "04 0000 0001", "04 02 002a")
             await check(1, "02 0000 0001", "02 01 01")
             await check(1, "06 0000 0514", "06 0000 0514")
-            assert events[-2] == ValuesChanged(1, Area.HR, 0, (1300,))
+            assert events[-2].payload == RuntimeChange(ValuesChanged(1, Area.HR, 0, (1300,)))
+            assert await session.read_current(ModbusServerTarget(1, Area.HR, 0)) == 1300
             await check(1, "10 0000 0002 04 000b 000c", "10 0000 0002")
             await check(1, "10 0000 0003 06 0001 0002 0003", "90 02")
             await check(1, "03 0000 0002", "03 04 000b 000c")
@@ -142,12 +155,20 @@ def test_server_plan_validation_and_storage(tmp_path, monkeypatch):
         storage.load_plan()
     assert storage.plan_path.read_bytes() == b"invalid"
     storage.save_plan(plan)
-    request = ServerRequest(datetime.now(), "127.0.0.1:52000", 1, 3, 2, 1, "成功", b"rx", b"tx")
-    assert not storage.append_request(request)
+    now = datetime.now()
+    details = {"unit_id": 1, "function": 3, "offset": 2, "count": 1}
+    request = RequestMetadata("127.0.0.1:52000", "成功", b"rx", b"tx", tuple(details.items()))
+    legacy = {"time": now.isoformat(), "peer": request.peer, "result": request.result,
+              "rx": request.rx.hex(), "tx": request.tx.hex(), **details}
+    storage.journal_path.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+    assert storage.recent_events() == (ServerEvent("modbus-tcp", "", now, request),)
+    event = ServerEvent("modbus-tcp", "127.0.0.1:1502", now, request)
+    assert not storage.append_event(event)
+    assert storage.recent_events() == (event, ServerEvent("modbus-tcp", "", now, request))
     monkeypatch.setattr("all_protocol.storage.LOG_LIMIT_BYTES", storage.journal_path.stat().st_size + 1)
-    latest = replace(request, rx=b"r2", tx=b"t2")
-    assert storage.append_request(latest)
-    assert storage.recent_requests() == (latest,)
+    latest = replace(event, payload=replace(request, rx=b"r2", tx=b"t2"))
+    assert storage.append_event(latest)
+    assert storage.recent_events() == (latest,)
     assert storage.load_plan() == plan
 
 

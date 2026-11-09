@@ -4,9 +4,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QComboBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QSplitter, QVBoxLayout
 
 from ..adapters.s7.model import MAX_OFFSET, Area, DataType, S7Target
-from ..adapters.s7.server import S7ServerRequest
 from ..adapters.s7.server_model import S7Memory, S7ServerPlan, S7ServerPoint, S7ValuesChanged
-from ..application.server_session import ListenerState
+from ..application.server_contracts import ListenerState, RequestMetadata, ServerEvent
 from .main_window import Rows, _heading, _panel, _table
 from .server_pane import EditDialog, ServerPane
 from .widgets import spinbox
@@ -15,9 +14,15 @@ from .widgets import spinbox
 AREAS = ((Area.DB, "DB 数据块"), (Area.M, "M 标志"), (Area.I, "I 输入"), (Area.Q, "Q 输出"))
 
 
-def _request_row(entry: S7ServerRequest):
-    function = f"0x{entry.function:02X}" if entry.function is not None else "—"
-    return (entry.time.strftime("%m-%d %H:%M:%S"), entry.peer or "—", function, entry.target or "—", entry.result)
+def _request_row(event: ServerEvent):
+    time = event.time.strftime("%m-%d %H:%M:%S")
+    entry = event.payload
+    if not isinstance(entry, RequestMetadata):
+        return (time, "—", "—", "—", entry.result)
+    details = dict(entry.details)
+    function = details.get("function")
+    return (time, entry.peer or "—", f"0x{function:02X}" if type(function) is int else "—",
+            details.get("target") or "—", entry.result)
 
 
 def _value_text(value):
@@ -35,7 +40,7 @@ def _parse_value(data_type, text):
 
 class S7ServerPane(ServerPane):
     def __init__(self, bridge, storage):
-        super().__init__(bridge, storage, S7ServerPlan(), S7ServerRequest)
+        super().__init__(bridge, storage, S7ServerPlan())
         self._points = ()
         self._memory = None
         self._build()
@@ -175,7 +180,7 @@ class S7ServerPane(ServerPane):
         def commit():
             value = _parse_value(point.target.data_type, field.text())
             point.encode(value)
-            self.bridge.submit(self.bridge.session.set_current(point.target, value))
+            self.bridge.submit(self.bridge.session.edit_current(point.target, value))
 
         dialog = EditDialog(self, "修改当前值", commit)
         dialog.form.addRow("点位", QLabel(point.target.address()))

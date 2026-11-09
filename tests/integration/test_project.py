@@ -144,7 +144,7 @@ def test_import_copies_configuration_without_changing_local_files(tmp_path):
     profiles = ProjectHistory(workspace, history)
     profiles.remember(modbus_profile("192.0.2.99"))
     profiles.forget(s7_profile())
-    ProjectServerStorage(workspace, "modbus-tcp", modbus).save_plan(ServerPlan(port=2502))
+    ProjectServerStorage(workspace, "modbus", modbus).save_plan(ServerPlan(port=2502))
     assert [path.read_bytes() for path in paths] == before
     assert workspace.project.modbus.port == 2502
     assert len(workspace.project.devices) == 2

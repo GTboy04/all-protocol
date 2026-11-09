@@ -6,10 +6,10 @@ from PySide6.QtWidgets import (
 )
 
 from ..adapters.modbus_tcp.model import RULES, Area, data_types
-from ..adapters.modbus_tcp.server import ServerRequest, ValuesChanged
-from ..adapters.modbus_tcp.server_model import ServerPlan, Station
+from ..adapters.modbus_tcp.server import ValuesChanged
+from ..adapters.modbus_tcp.server_model import ModbusServerTarget, ServerPlan, Station
 from ..adapters.modbus_tcp.values import DataType, RegisterOrder
-from ..application.server_session import ListenerState
+from ..application.server_contracts import ListenerState, RequestMetadata, ServerEvent
 from .main_window import Rows, _heading, _panel, _table
 from .modbus_tcp_form import order_picker
 from .server_pane import EditDialog, ServerPane
@@ -37,15 +37,21 @@ def _value_field(data_type, value, parse=None):
     return field, lambda: read(field.text())
 
 
-def _request_row(entry: ServerRequest):
-    return (entry.time.strftime("%m-%d %H:%M:%S"), entry.peer or "—", _display(entry.unit_id),
-            f"0x{entry.function:02X}" if entry.function is not None else "—", _display(entry.offset),
-            _display(entry.count), entry.result)
+def _request_row(event: ServerEvent):
+    time = event.time.strftime("%m-%d %H:%M:%S")
+    entry = event.payload
+    if not isinstance(entry, RequestMetadata):
+        return (time, "—", "—", "—", "—", "—", entry.result)
+    details = dict(entry.details)
+    function = details.get("function")
+    return (time, entry.peer or "—", _display(details.get("unit_id")),
+            f"0x{function:02X}" if type(function) is int else "—", _display(details.get("offset")),
+            _display(details.get("count")), entry.result)
 
 
 class ModbusServerPane(ServerPane):
     def __init__(self, bridge, storage):
-        super().__init__(bridge, storage, ServerPlan(), ServerRequest)
+        super().__init__(bridge, storage, ServerPlan())
         self._current = {}
         self._point_rows = {}
         self._stations = ()
@@ -265,7 +271,7 @@ class ModbusServerPane(ServerPane):
         def commit():
             value = get_value()
             point.encode(value)
-            self.bridge.submit(self.bridge.session.set_current(*key, value))
+            self.bridge.submit(self.bridge.session.edit_current(ModbusServerTarget(*key), value))
 
         dialog = EditDialog(self, "修改当前值", commit)
         dialog.form.addRow("点位", QLabel(f"Unit {station.unit_id}  ·  {point.area} / {point.offset}"))

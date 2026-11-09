@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
-from ..application.server_session import ListenerState, ListenerUpdate
+from ..application.server_contracts import ListenerState, ListenerUpdate, RequestMetadata, RuntimeChange, ServerLifecycle
 from .main_window import Rows, _heading, _panel, _table
 from .widgets import add_field, spinbox
 
@@ -43,14 +43,22 @@ class EditDialog(QDialog):
 class ServerPane(QWidget):
     listener_changed = Signal()
 
-    def __init__(self, bridge, storage, default_plan, request_type):
+    def __init__(self, bridge, storage, default_plan):
         super().__init__()
         self.bridge = bridge
         self._storage = storage
         self._saved_plan = default_plan
-        self._request_type = request_type
         self.state = ListenerState.STOPPED
+        self.endpoint = ""
         self._load_error = False
+
+    @property
+    def configured_endpoint(self):
+        host = self.host.text()
+        return f"[{host}]:{self.port.value()}" if ":" in host else f"{host}:{self.port.value()}"
+
+    def configuration_plan(self):
+        return self._plan()
 
     def _settings(self):
         panel, layout = _panel()
@@ -125,7 +133,7 @@ class ServerPane(QWidget):
         self.host.setText(self._saved_plan.host)
         self.port.setValue(self._saved_plan.port)
         try:
-            self.requests.reset(self._storage.recent_requests())
+            self.requests.reset(self._storage.recent_events())
         except OSError as error:
             self._feedback(f"{self.feedback.text()}\n无法读取请求日志 · {error}".strip())
         self.bridge.event.connect(self._handle_event, Qt.ConnectionType.QueuedConnection)
@@ -176,28 +184,32 @@ class ServerPane(QWidget):
         self._refresh()
 
     def _handle_event(self, event):
-        if isinstance(event, ListenerUpdate):
-            previous, self.state = self.state, event.state
-            if event.error:
-                self._feedback(event.error)
+        payload = event.payload
+        if isinstance(payload, ListenerUpdate):
+            previous, self.state = self.state, payload.state
+            self.endpoint = event.endpoint
+            if payload.error:
+                self._feedback(payload.error)
             if previous != self.state:
                 self._state_changed()
             self._refresh()
-        elif isinstance(event, self._request_type):
+        elif isinstance(payload, (RequestMetadata, ServerLifecycle)):
             try:
-                if self._storage.append_request(event):
+                if self._storage.append_event(event):
                     self.requests.reset()
                     self.detail.clear()
             except OSError as error:
                 self._feedback(f"保存请求日志失败 · {error}")
             self.requests.prepend(event)
-        else:
-            self._runtime_changed(event)
+        elif isinstance(payload, RuntimeChange):
+            self._runtime_changed(payload.details)
 
     def _show_request(self, index, _previous):
         if index.isValid():
-            entry = self.requests.items[index.row()]
-            self.detail.setPlainText(f"RX  {entry.rx.hex(' ').upper() or '—'}\nTX  {entry.tx.hex(' ').upper() or '—'}")
+            payload = self.requests.items[index.row()].payload
+            rx = payload.rx.hex(" ").upper() if isinstance(payload, RequestMetadata) else ""
+            tx = payload.tx.hex(" ").upper() if isinstance(payload, RequestMetadata) else ""
+            self.detail.setPlainText(f"RX  {rx or '—'}\nTX  {tx or '—'}")
         else:
             self.detail.clear()
 

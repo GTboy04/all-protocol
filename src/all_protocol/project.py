@@ -270,21 +270,20 @@ class ProjectHistory:
 
 
 class ProjectServerStorage:
-    def __init__(self, workspace: ProjectWorkspace, protocol: str, local):
-        self.workspace, self.protocol, self.local = workspace, protocol, local
+    def __init__(self, workspace: ProjectWorkspace, project_field: str, local):
+        self.workspace, self.project_field, self.local = workspace, project_field, local
         self.plan_path = "当前项目"
         self.project_mode = True
 
     def load_plan(self):
-        return self.workspace.project.modbus if self.protocol == "modbus-tcp" else self.workspace.project.s7
+        return getattr(self.workspace.project, self.project_field)
 
     def save_plan(self, plan):
         plan.validate()
-        key = "modbus" if self.protocol == "modbus-tcp" else "s7"
-        self.workspace.project = replace(self.workspace.project, **{key: plan})
+        self.workspace.project = replace(self.workspace.project, **{self.project_field: plan})
 
-    def recent_requests(self):
-        return self.local.recent_requests()
+    def recent_events(self):
+        return self.local.recent_events()
 
-    def append_request(self, request):
-        return self.local.append_request(request)
+    def append_event(self, event):
+        return self.local.append_event(event)

@@ -9,13 +9,12 @@ from pathlib import Path
 from PySide6.QtCore import QIODevice, QLockFile, QSaveFile
 
 from .adapters.modbus_tcp.model import Area
-from .adapters.modbus_tcp.server import ServerRequest
 from .adapters.modbus_tcp.server_model import ServerPlan, ServerPoint, Station
 from .adapters.modbus_tcp.values import DataType, RegisterOrder
 from .adapters.s7.model import Area as S7Area, DataType as S7DataType, S7Target
-from .adapters.s7.server import S7ServerRequest
 from .adapters.s7.server_model import S7ServerPlan, S7ServerPoint
 from .application.contracts import ErrorKind, JournalEntry
+from .application.server_contracts import LifecycleAction, RequestMetadata, ServerEvent, ServerLifecycle
 
 
 LOG_LIMIT_BYTES = 5 * 1024 * 1024
@@ -186,20 +185,73 @@ class LocalHistory:
             return _append_journal(self.journal_path, record)
 
 
-def _load_server_request(line: bytes) -> ServerRequest:
-    data = json.loads(line)
-    if not isinstance(data, dict):
-        raise ValueError("Expected a server request")
-    for field in ("peer", "result"):
-        if not isinstance(data[field], str):
-            raise ValueError(f"Invalid request field {field}")
-    for field in ("unit_id", "function", "offset", "count"):
-        if data[field] is not None and type(data[field]) is not int:
-            raise ValueError(f"Invalid request field {field}")
-    data["time"] = datetime.fromisoformat(data["time"])
-    data["rx"] = bytes.fromhex(data["rx"])
-    data["tx"] = bytes.fromhex(data["tx"])
-    return ServerRequest(**data)
+def _text(data: dict, field: str) -> str:
+    value = data[field]
+    if not isinstance(value, str):
+        raise ValueError(f"Invalid server journal field {field}")
+    return value
+
+
+def _request_metadata(data: dict, details: dict) -> RequestMetadata:
+    return RequestMetadata(
+        _text(data, "peer"), _text(data, "result"),
+        bytes.fromhex(_text(data, "rx")), bytes.fromhex(_text(data, "tx")), tuple(details.items()),
+    )
+
+
+class _ServerJournal:
+    _journal_protocol: str
+    _journal_lock: str
+    _legacy_detail_types: dict
+    directory: Path
+    journal_path: Path
+
+    def _decode_event(self, line: bytes) -> ServerEvent:
+        data = json.loads(line)
+        if not isinstance(data, dict):
+            raise ValueError("Expected a server journal record")
+        time = datetime.fromisoformat(_text(data, "time"))
+        if "schema_version" not in data:
+            details = {field: data[field] for field in self._legacy_detail_types}
+            if any(type(value) not in self._legacy_detail_types[field] for field, value in details.items()):
+                raise ValueError("Invalid legacy server request details")
+            return ServerEvent(self._journal_protocol, "", time, _request_metadata(data, details))
+
+        if (type(data["schema_version"]) is not int or data["schema_version"] != 1
+                or data["protocol"] != self._journal_protocol):
+            raise ValueError("Unknown server journal version or protocol")
+        endpoint = _text(data, "endpoint")
+        if data["kind"] == "lifecycle":
+            payload = ServerLifecycle(LifecycleAction(data["action"]), _text(data, "result"))
+        elif data["kind"] == "request":
+            details = data["details"]
+            if not isinstance(details, dict) or any(type(value) not in (str, int, bool, float, type(None))
+                                                    for value in details.values()):
+                raise ValueError("Invalid server request details")
+            payload = _request_metadata(data, details)
+        else:
+            raise ValueError("Unknown server event kind")
+        return ServerEvent(self._journal_protocol, endpoint, time, payload)
+
+    def recent_events(self) -> tuple[ServerEvent, ...]:
+        with _locked(self.directory, self._journal_lock):
+            return _read_journal(self.journal_path, self._decode_event)
+
+    def append_event(self, event: ServerEvent) -> bool:
+        if event.protocol != self._journal_protocol:
+            raise ValueError("Server event belongs to a different protocol")
+        record = {"schema_version": 1, "protocol": event.protocol, "endpoint": event.endpoint,
+                  "time": event.time.isoformat()}
+        payload = event.payload
+        if isinstance(payload, RequestMetadata):
+            record.update(kind="request", peer=payload.peer, result=payload.result, rx=payload.rx.hex(),
+                          tx=payload.tx.hex(), details=dict(payload.details))
+        elif isinstance(payload, ServerLifecycle):
+            record.update(kind="lifecycle", action=payload.action, result=payload.result)
+        else:
+            raise ValueError("Only request and lifecycle events can be stored")
+        with _locked(self.directory, self._journal_lock):
+            return _append_journal(self.journal_path, record)
 
 
 def decode_modbus_plan(data) -> ServerPlan:
@@ -227,7 +279,11 @@ def decode_modbus_plan(data) -> ServerPlan:
     return plan
 
 
-class ServerStorage:
+class ServerStorage(_ServerJournal):
+    _journal_protocol = "modbus-tcp"
+    _journal_lock = "server-journal.lock"
+    _legacy_detail_types = dict.fromkeys(("unit_id", "function", "offset", "count"), (int, type(None)))
+
     def __init__(self, directory: Path):
         self.directory = directory
         self.plan_path = directory / "modbus-tcp-server.json"
@@ -245,32 +301,6 @@ class ServerStorage:
         record = {"schema_version": 2, "protocol": "modbus-tcp", **asdict(plan)}
         with _locked(self.directory, "server-plan.lock"):
             _replace_file(self.plan_path, _json_bytes(record))
-
-    def recent_requests(self) -> tuple[ServerRequest, ...]:
-        with _locked(self.directory, "server-journal.lock"):
-            return _read_journal(self.journal_path, _load_server_request)
-
-    def append_request(self, request: ServerRequest) -> bool:
-        record = asdict(request)
-        record.update(time=request.time.isoformat(), rx=request.rx.hex(), tx=request.tx.hex())
-        with _locked(self.directory, "server-journal.lock"):
-            return _append_journal(self.journal_path, record)
-
-
-def _load_s7_server_request(line: bytes) -> S7ServerRequest:
-    data = json.loads(line)
-    if not isinstance(data, dict):
-        raise ValueError("Expected an S7 request record")
-    for field in ("time", "peer", "target", "result", "rx", "tx"):
-        if not isinstance(data[field], str):
-            raise ValueError(f"Invalid request field {field}")
-    if data["function"] is not None and type(data["function"]) is not int:
-        raise ValueError("Invalid S7 function")
-    data["time"] = datetime.fromisoformat(data["time"])
-    data["rx"] = bytes.fromhex(data["rx"])
-    data["tx"] = bytes.fromhex(data["tx"])
-    return S7ServerRequest(**data)
-
 
 def decode_s7_plan(data) -> S7ServerPlan:
     if (not isinstance(data, dict) or type(data.get("schema_version")) is not int
@@ -291,7 +321,11 @@ def decode_s7_plan(data) -> S7ServerPlan:
     return plan
 
 
-class S7ServerStorage:
+class S7ServerStorage(_ServerJournal):
+    _journal_protocol = "s7"
+    _journal_lock = "s7-server-journal.lock"
+    _legacy_detail_types = {"function": (int, type(None)), "target": (str,)}
+
     def __init__(self, directory: Path):
         self.directory = directory
         self.plan_path = directory / "s7-server.json"
@@ -309,13 +343,3 @@ class S7ServerStorage:
         record = {"schema_version": 1, "protocol": "s7", **asdict(plan)}
         with _locked(self.directory, "s7-server-plan.lock"):
             _replace_file(self.plan_path, _json_bytes(record))
-
-    def recent_requests(self) -> tuple[S7ServerRequest, ...]:
-        with _locked(self.directory, "s7-server-journal.lock"):
-            return _read_journal(self.journal_path, _load_s7_server_request)
-
-    def append_request(self, request: S7ServerRequest) -> bool:
-        record = asdict(request)
-        record.update(time=request.time.isoformat(), rx=request.rx.hex(), tx=request.tx.hex())
-        with _locked(self.directory, "s7-server-journal.lock"):
-            return _append_journal(self.journal_path, record)

@@ -10,19 +10,23 @@ from PySide6.QtWidgets import (
 from ..application.contracts import ClientError
 from ..application.session_manager import SessionManager
 from ..project import Project, ProjectFile, ProjectHistory, ProjectServerStorage, ProjectWorkspace, decode_project, project_record
-from ..storage import LocalHistory, ServerStorage, S7ServerStorage
+from ..server_protocols import SERVER_PROTOCOLS
+from ..storage import LocalHistory
 from .io_bridge import IoBridge
 from .main_window import MainWindow, _heading, _panel
 from .server_workbench import ServerWorkbench
 
 
 class RoleWindow(QWidget):
-    def __init__(self, protocols, data_dir: Path):
+    def __init__(self, protocols, data_dir: Path, server_protocols=SERVER_PROTOCOLS):
         super().__init__()
         self.setWindowTitle("工业协议调试台")
         self.setObjectName("workspace")
         self.resize(800, 400)
         self._protocols = protocols
+        self._server_protocols = tuple(server_protocols)
+        if len({item.registration.key for item in self._server_protocols}) != len(self._server_protocols):
+            raise ValueError("服务端协议键重复")
         self._data_dir = data_dir
         self._workbenches = {}
         self.workspace: ProjectWorkspace | None = None
@@ -61,7 +65,8 @@ class RoleWindow(QWidget):
         cards.setSpacing(14)
         cards.addWidget(self._card("客户端", "本机  ──请求──→  设备", "连接设备，读取或写入点位。",
                                    self._open_client), 1)
-        cards.addWidget(self._card("服务端", "上位机  ──请求──→  本机", "同时监听 Modbus TCP 和 Siemens S7。",
+        server_labels = "、".join(item.registration.label for item in self._server_protocols)
+        cards.addWidget(self._card("服务端", "上位机  ──请求──→  本机", f"可同时监听 {server_labels}。",
                                    self._open_server), 1)
         body.addLayout(cards, 1)
         layout.addLayout(body, 1)
@@ -100,13 +105,15 @@ class RoleWindow(QWidget):
 
     def _open_server(self):
         def create():
-            storages = None
-            if self.workspace is not None:
-                storages = (
-                    ProjectServerStorage(self.workspace, "modbus-tcp", ServerStorage(self._data_dir)),
-                    ProjectServerStorage(self.workspace, "s7", S7ServerStorage(self._data_dir)),
-                )
-            workbench = ServerWorkbench(self._data_dir, self._return_home, storages)
+            protocols_and_storages = []
+            for protocol in self._server_protocols:
+                if self.workspace is not None and protocol.project_field is None:
+                    continue
+                storage = protocol.create_storage(self._data_dir)
+                if self.workspace is not None:
+                    storage = ProjectServerStorage(self.workspace, protocol.project_field, storage)
+                protocols_and_storages.append((protocol, storage))
+            workbench = ServerWorkbench(self._return_home, protocols_and_storages)
             return workbench, workbench
 
         self._open("server", create)
@@ -216,8 +223,7 @@ class RoleWindow(QWidget):
                 project = project.remember(profile)
         server = self._workbenches.get("server")
         if server is not None:
-            tabs = server[0].tabs
-            project = replace(project, modbus=tabs.widget(0)._plan(), s7=tabs.widget(1)._plan())
+            project = replace(project, **server[0].project_plans())
         # Validate the whole snapshot before mutating workspace state.
         decode_project(project_record(project))
         return project

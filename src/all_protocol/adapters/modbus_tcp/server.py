@@ -195,8 +195,17 @@ class TcpServer(ModbusTcpServer):
             logging.exception("Modbus TCP request failed")
             return ExceptionResponse(code, ExcCodes.DEVICE_FAILURE)
 
-    def set_current(self, unit: int, area: Area, offset: int, value: Value):
+    def _point(self, unit: int, area: Area, offset: int):
         point = self.context.points.get((unit, area, offset))
         if point is None:
             raise ValueError("点位不存在")
+        return point
+
+    def read_current(self, unit: int, area: Area, offset: int) -> Value:
+        point = self._point(unit, area, offset)
+        station = self.context.stations[unit]
+        return point.decode(tuple(station[area, address] for address in point.addresses))
+
+    def set_current(self, unit: int, area: Area, offset: int, value: Value):
+        point = self._point(unit, area, offset)
         self.context.set_values(unit, area, offset, point.encode(value))

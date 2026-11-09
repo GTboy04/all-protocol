@@ -163,11 +163,17 @@ class S7Server:
         if listener is not None:
             await listener.wait_closed()
 
-    def set_current(self, target, value: Value):
+    def _point(self, target):
         point = self._points.get(target)
         if point is None:
             raise ValueError("点位不存在")
-        self._changed(self._memory.set_point(point, value))
+        return point
+
+    def read_current(self, target) -> Value:
+        return self._memory.current(self._point(target))
+
+    def set_current(self, target, value: Value):
+        self._changed(self._memory.set_point(self._point(target), value))
 
     def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         if self._stopping:

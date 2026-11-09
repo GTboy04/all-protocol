@@ -6,6 +6,13 @@ from .values import DataType, RegisterOrder
 
 
 @dataclass(frozen=True, slots=True)
+class ModbusServerTarget:
+    unit_id: int
+    area: Area
+    offset: int
+
+
+@dataclass(frozen=True, slots=True)
 class ServerPoint:
     area: Area
     offset: int

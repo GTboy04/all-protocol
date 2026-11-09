@@ -2,6 +2,7 @@ import asyncio
 from contextlib import closing
 from dataclasses import replace
 from datetime import datetime
+import json
 import socket
 
 import pytest
@@ -12,10 +13,13 @@ from all_protocol.adapters.modbus_tcp.model import Area as ModbusArea
 from all_protocol.adapters.modbus_tcp.server_model import ServerPlan, Station
 from all_protocol.adapters.s7.client import S7Client
 from all_protocol.adapters.s7.model import Area, DataType, S7Config, S7Target
-from all_protocol.adapters.s7.server import S7Server, S7ServerRequest
+from all_protocol.adapters.s7.server import S7Server
 from all_protocol.adapters.s7.server_model import S7ServerPlan, S7ServerPoint
 from all_protocol.adapters.s7.wire import read_tpkt, tpkt
 from all_protocol.application.contracts import ClientError, ClientEvents, ErrorKind
+from all_protocol.application.server_contracts import LifecycleAction, RequestMetadata, ServerEvent, ServerLifecycle
+from all_protocol.application.server_session import ServerSession
+from all_protocol.server_protocols import SERVER_PROTOCOLS
 from all_protocol.storage import S7ServerStorage, ServerStorage
 
 
@@ -34,9 +38,9 @@ def test_s7_server_typed_memory_and_bit_writes():
         plan.validate(starting=True)
         with pytest.raises(ValueError, match="重叠"):
             replace(plan, points=plan.points + (S7ServerPoint(S7Target(Area.DB, 1, 0, DataType.BYTE)),)).validate()
-        requests = []
-        server = S7Server(plan, lambda _: None, requests.append)
-        await server.bind()
+        events = []
+        server = ServerSession(events.append, SERVER_PROTOCOLS[1].registration)
+        await server.start(plan)
         client = S7Client(S7Config(plan.host, port), ClientEvents(lambda *_: None, lambda: None))
         try:
             await client.connect()
@@ -46,15 +50,20 @@ def test_s7_server_typed_memory_and_bit_writes():
             await client.write(word, (456,))
             assert (await client.read(word))[0].value == 456
             assert (await client.read(input_point))[0].value == 8
-            server.set_current(input_point, 9)
+            assert await server.read_current(bit_1) is True
+            assert await server.read_current(bit_7) is True
+            await server.write_current(input_point, 9)
+            assert await server.read_current(input_point) == 9
             assert (await client.read(input_point))[0].value == 9
             with pytest.raises(ClientError) as error:
                 await client.read(replace(word, offset=2))
             assert error.value.kind == ErrorKind.PROTOCOL and error.value.code == 0x05
-            assert all(request.rx and request.tx for request in requests)
+            requests = [event.payload for event in events if isinstance(event.payload, RequestMetadata)]
+            assert requests and all(request.rx and request.tx for request in requests)
+            assert any(dict(request.details)["target"] == "DB1 0.1" for request in requests)
         finally:
             await client.close()
-            await server.shutdown()
+            await server.stop()
 
     asyncio.run(run())
 
@@ -107,9 +116,19 @@ def test_s7_server_plan_and_journal_round_trip(tmp_path):
     assert storage.load_plan() == plan
     storage.save_plan(plan)
     assert storage.load_plan() == plan
-    request = S7ServerRequest(datetime.now(), "127.0.0.1:2000", 4, "DB1", "成功", b"\x01", b"\x02")
-    storage.append_request(request)
-    assert storage.recent_requests() == (request,)
+    now = datetime.now()
+    legacy = {"time": now.isoformat(), "peer": "127.0.0.1:2000", "function": 4, "target": "DB1",
+              "result": "成功", "rx": "01", "tx": "02"}
+    storage.journal_path.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+    request = RequestMetadata(legacy["peer"], "成功", b"\x01", b"\x02", (("function", 4), ("target", "DB1")))
+    start = ServerEvent("s7", "127.0.0.1:1102", now, ServerLifecycle(LifecycleAction.STARTED, "启动监听"))
+    assert not storage.append_event(start)
+    rows = storage.journal_path.read_text(encoding="utf-8").splitlines()
+    latest = json.loads(rows[-1])
+    assert latest["schema_version"] == 1 and latest["kind"] == "lifecycle"
+    with storage.journal_path.open("a", encoding="utf-8") as journal:
+        journal.write(json.dumps({**latest, "schema_version": 2}) + "\n")
+    assert storage.recent_events() == (start, ServerEvent("s7", "", now, request))
     assert not ServerStorage(tmp_path).plan_path.exists()
     assert not ServerStorage(tmp_path).journal_path.exists()
 
