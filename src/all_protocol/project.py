@@ -290,6 +290,9 @@ class ProjectHistory:
     def recent_entries(self):
         return self.local.recent_entries()
 
+    def read_log(self):
+        return self.local.read_log()
+
     def append_entry(self, entry):
         return self.local.append_entry(entry)
 

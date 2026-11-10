@@ -13,6 +13,7 @@
 - R7 由 `ServerSession` 管理每个监听的场景时钟与定时任务，经 R5 运行值接口写入。适配器报告成功写入的地址范围，S7 另附位掩码。点位各保存一条规则，运行值、接管及故障只保留在监听会话。含规则的 Modbus 方案使用 v3、S7 使用 v2。全量 204 项测试通过。
 - R8 请求诊断复用已捕获日志，每 500 ms 刷新筛选结果，选中报文时按需解码。新服务端日志增加可选的耗时、错误和会话／请求编号。故障规则由 `ServerSession` 管理，经适配器回调匹配，停止监听时由适配器取消延迟任务。全量 216 项测试通过。 [R8 验收细节](requirements/R8-diagnostics.md)
 - R9 的验收分支为 `codex/r9-write-verification`，基于 R8 的 `0a9feee`。写入与自动回读作为同一设备队列的相邻操作。客户端日志保存结构化写入和验证证据，独立核对通过原写入的会话与请求 ID 关联。全量 233 项测试通过。 [R9 验收细节](requirements/R9-write-verification.md)
-- 下一项为 [R10 联调记录与报告导出](requirements/R10-reports.md)。
+- R10 的验收分支为 `codex/r10-reports`，基于 R9 的 `09c30a7`。项目工作区冻结配置与有界日志后在后台生成预览和报告包，客户端按设备 ID 匹配，服务端按本次工作区采集。全量 240 项测试通过。 [R10 验收细节](requirements/R10-reports.md)
+- R1–R10 开发路线已完成。
 - 常用命令：`.venv/Scripts/python.exe -m pytest -q`、`git diff --check`。离屏截图需显式加载系统 msyh.ttc；产品字体不变。
 - Git：每项独立分支与提交，不自动合并或推送，结束时保持干净工作区。

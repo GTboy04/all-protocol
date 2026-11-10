@@ -1,4 +1,5 @@
 from dataclasses import replace
+from datetime import datetime
 
 from PySide6.QtCore import QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import QColor
@@ -10,6 +11,8 @@ from PySide6.QtWidgets import (
 from ..application.contracts import ConnectionState
 from ..application.server_contracts import ListenerState
 from ..project import WorkspaceLayout
+from ..reporting import ReportSnapshot
+from .report_dialog import ReportDialog
 
 
 class _ContextLabel(QLabel):
@@ -44,6 +47,8 @@ class ProjectWindow(QMainWindow):
         self._items = {}
         self._structure = None
         self._errors = {}
+        self._report = None
+        self._opened_at = datetime.now().astimezone()
         self.setWindowTitle(f"{workspace.project.name} · 项目工作区")
         self.resize(1280, 840)
         self._build(home, save)
@@ -71,6 +76,8 @@ class ProjectWindow(QMainWindow):
         toolbar.setContentsMargins(12, 8, 12, 8)
         toolbar.addWidget(self._button("返回首页", home))
         toolbar.addWidget(self._button("保存项目", save))
+        self.report_button = self._button("导出联调报告…", self._open_report)
+        toolbar.addWidget(self.report_button)
         toolbar.addWidget(QLabel("项目工作区", objectName="title"))
         toolbar.addStretch()
         self.connections = QLabel(objectName="connectionStatus")
@@ -389,6 +396,20 @@ class ProjectWindow(QMainWindow):
             self.tree.scrollToItem(item)
             self.tree.setFocus()
 
+    def _open_report(self):
+        if self._report is None:
+            self._report = ReportDialog(self, self._capture_report)
+            self._report.finished.connect(self._report_closed)
+            self._report.open()
+
+    def _capture_report(self, scope, frozen_at):
+        return ReportSnapshot.capture(self.workspace.project, scope, self.client.report_log(),
+                                      tuple((protocol, pane.report_log()) for protocol, (_, _, pane) in self._panes.items()),
+                                      self._opened_at, frozen_at)
+
+    def _report_closed(self):
+        self._report = None
+
     def has_running_io(self):
         return (any(self.client.workspace_device_status(device.id)[0] != ConnectionState.OFFLINE
                     for device in self.workspace.project.devices)
@@ -405,6 +426,8 @@ class ProjectWindow(QMainWindow):
                 return False
             self._closing = True
             self.setEnabled(False)
+            if self._report is not None:
+                self._report.reject()
             self._updates.stop()
             self.client.shutdown_embedded()
             self.servers.shutdown_embedded()
@@ -424,6 +447,8 @@ class ProjectWindow(QMainWindow):
             self.close()
 
     def join(self):
+        if self._report is not None:
+            self._report.reject()
         self.client._bridge.join()
         self.servers.join()
 

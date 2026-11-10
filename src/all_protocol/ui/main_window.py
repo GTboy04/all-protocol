@@ -1,6 +1,7 @@
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSignalBlocker, Qt, Signal
@@ -16,6 +17,7 @@ from ..application.contracts import (
     ReadUpdate, SessionState, TableReadUpdate, Target, WriteStatus,
 )
 from ..application.diagnostics import DiagnosticRow, verification_summary, write_evidence_lines
+from ..application.journal import LogRetention, RetainedLog
 from ..point_tables import PointDefinition
 from ..application.session_manager import SessionManager
 from ..application.sampling import SampleStore
@@ -167,6 +169,7 @@ class MainWindow(QMainWindow):
         self._last_reads = {}
         self._quick_values = {}
         self._all_entries = []
+        self._log_retention = LogRetention()
         self._write_context = None
         self._latest_write = None
         self._diagnostics = None
@@ -528,10 +531,15 @@ class MainWindow(QMainWindow):
         if self._history is None:
             return
         try:
-            entries = self._history.recent_entries()
+            if self._project_mode:
+                log = self._history.read_log()
+                entries, self._log_retention = log.entries, log.retention
+            else:
+                entries = self._history.recent_entries()
             self.journal.reset(entries)
             self._all_entries = list(entries)
         except OSError:
+            self._log_retention = replace(self._log_retention, incomplete=True)
             self._history_failure("无法读取本地请求日志")
         try:
             self._show_profiles(self._history.profiles())
@@ -874,6 +882,9 @@ class MainWindow(QMainWindow):
         device = next((item for item in self._history.workspace.project.devices if item.id == self._active_device_id), None)
         return bool(device and entry.protocol == device.profile.protocol and entry.endpoint == device.profile.endpoint)
 
+    def report_log(self) -> RetainedLog[JournalEntry]:
+        return RetainedLog(tuple(self._all_entries), self._log_retention)
+
     def _append_journal(self, entry):
         cleared = False
         if self._history is not None:
@@ -883,10 +894,14 @@ class MainWindow(QMainWindow):
                     self.journal.reset()
                     self.detail.clear()
                     cleared = True
+                    self._log_retention = replace(self._log_retention, rotated_at=datetime.now().astimezone(), clipped=False)
             except OSError:
+                self._log_retention = replace(self._log_retention, incomplete=True)
                 self._history_failure("无法保存本地请求日志")
         self._all_entries.insert(0, entry)
         expired = self._all_entries[VISIBLE_LOG_ROWS:]
+        if expired and not self._log_retention.clipped:
+            self._log_retention = replace(self._log_retention, clipped=True)
         del self._all_entries[VISIBLE_LOG_ROWS:]
         if self._entry_visible(entry):
             self.journal.prepend(entry)

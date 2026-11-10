@@ -1,3 +1,7 @@
+from collections import deque
+from dataclasses import replace
+from datetime import datetime
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -6,8 +10,10 @@ from PySide6.QtWidgets import (
 
 from ..application.diagnostics import DiagnosticRow
 from ..application.faults import FaultAction, FaultUpdate
+from ..application.journal import LogRetention, RetainedLog
 from ..application.server_contracts import ListenerState, ListenerUpdate, RequestMetadata, RuntimeChange, ServerLifecycle
 from ..application.simulation import SimulationUpdate
+from ..storage import VISIBLE_LOG_ROWS
 from .main_window import Rows, _heading, _panel, _table
 from .diagnostics_dialog import DiagnosticsDialog
 from .fault_dialog import FaultDialog
@@ -23,6 +29,8 @@ class ServerPane(QWidget):
         super().__init__()
         self.bridge = bridge
         self._storage = storage
+        self._workspace_log = deque(maxlen=VISIBLE_LOG_ROWS) if getattr(storage, "project_mode", False) else None
+        self._log_retention = LogRetention()
         self._saved_plan = default_plan
         self.state = ListenerState.STOPPED
         self.endpoint = ""
@@ -252,9 +260,18 @@ class ServerPane(QWidget):
                 if self._storage.append_event(event):
                     self.requests.reset()
                     self.detail.clear()
+                    if self._workspace_log is not None:
+                        self._workspace_log.clear()
+                        self._log_retention = replace(self._log_retention, rotated_at=datetime.now().astimezone(),
+                                                      clipped=False)
             except OSError as error:
+                self._log_retention = replace(self._log_retention, incomplete=True)
                 self._feedback(f"保存请求日志失败 · {error}")
             self.requests.prepend(event)
+            if self._workspace_log is not None:
+                if len(self._workspace_log) == VISIBLE_LOG_ROWS and not self._log_retention.clipped:
+                    self._log_retention = replace(self._log_retention, clipped=True)
+                self._workspace_log.append(event)
         elif isinstance(payload, RuntimeChange):
             self._runtime_changed(payload.details)
         elif isinstance(payload, SimulationUpdate):
@@ -264,6 +281,10 @@ class ServerPane(QWidget):
         elif isinstance(payload, FaultUpdate):
             self.fault_update = payload
             self._refresh_fault()
+
+    def report_log(self):
+        return RetainedLog(tuple(reversed(self._workspace_log)) if self._workspace_log is not None else (),
+                           self._log_retention)
 
     def _show_request(self, index, _previous):
         if index.isValid():

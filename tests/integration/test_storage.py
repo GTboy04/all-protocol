@@ -75,3 +75,24 @@ def test_journal_recovers_after_partial_write_and_cleans_oversize_on_start(tmp_p
     monkeypatch.setattr(storage, "LOG_LIMIT_BYTES", history.journal_path.stat().st_size - 1)
     assert history.recent_entries() == ()
     assert not history.journal_path.exists()
+
+
+def test_journal_retention_survives_rotation_and_reopen(tmp_path, monkeypatch):
+    history = LocalHistory(tmp_path)
+    first = JournalEntry(1, datetime.now(), "读取", "站 1", "0x03", 1, "成功", detail="x" * 200)
+    history.append_entry(first)
+    monkeypatch.setattr(storage, "LOG_LIMIT_BYTES", 2 * history.journal_path.stat().st_size - 1)
+    second = replace(first, request_id=2)
+    assert history.append_entry(second)
+    retained = LocalHistory(tmp_path).read_log()
+    assert retained.entries == (second,) and retained.retention.rotated_at.utcoffset() is not None
+    assert not retained.retention.clipped and not retained.retention.incomplete
+    third = replace(first, request_id=3, detail="")
+    assert not history.append_entry(third)
+    with history.journal_path.open("ab") as journal:
+        journal.write(b'{"broken":\n')
+    monkeypatch.setattr(storage, "VISIBLE_LOG_ROWS", 1)
+    reopened = LocalHistory(tmp_path).read_log()
+    assert reopened.entries == (third,)
+    assert reopened.retention.rotated_at == retained.retention.rotated_at
+    assert reopened.retention.clipped and reopened.retention.incomplete

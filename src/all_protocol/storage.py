@@ -16,13 +16,13 @@ from .adapters.s7.server_model import S7ServerPlan, S7ServerPoint
 from .application.contracts import (
     ErrorKind, JournalEntry, VerificationOptions, VerificationResult, VerificationStatus, WriteResult, WriteStatus,
 )
+from .application.journal import VISIBLE_LOG_ROWS, LogRetention, RetainedLog
 from .application.server_contracts import LifecycleAction, RequestMetadata, ServerEvent, ServerLifecycle
 from .application.simulation import decode_rule
 from .point_tables import decode_target, target_record
 
 
 LOG_LIMIT_BYTES = 5 * 1024 * 1024
-VISIBLE_LOG_ROWS = 500
 type ProfileFields = dict[str, str | int]
 
 
@@ -65,10 +65,7 @@ def _load_profile(data) -> ConnectionProfile | None:
     return None
 
 
-def _load_entry(line: bytes) -> JournalEntry:
-    data = json.loads(line)
-    if not isinstance(data, dict):
-        raise ValueError("Expected a journal record")
+def _load_entry(data: dict) -> JournalEntry:
     for field in ("operation", "target", "function", "outcome", "detail", "protocol", "endpoint"):
         if not isinstance(data[field], str):
             raise ValueError(f"Invalid journal field {field}")
@@ -135,18 +132,28 @@ def _locked(directory: Path, name: str):
 
 def _read_journal(path: Path, decode):
     if not path.exists():
-        return ()
+        return RetainedLog()
     if path.stat().st_size > LOG_LIMIT_BYTES:
         path.unlink()
-        return ()
+        return RetainedLog(retention=LogRetention(rotated_at=datetime.now().astimezone()))
     recent = deque(maxlen=VISIBLE_LOG_ROWS)
+    rotated_at = None
+    clipped = incomplete = False
     with path.open("rb") as journal:
         for line in journal:
             try:
-                recent.append(decode(line))
+                data = json.loads(line)
+                if not isinstance(data, dict):
+                    raise ValueError("Expected a journal record")
+                if set(data) == {"journal_rotated_at"}:
+                    rotated_at = datetime.fromisoformat(data["journal_rotated_at"])
+                    continue
+                entry = decode(data)
+                clipped |= len(recent) == VISIBLE_LOG_ROWS
+                recent.append(entry)
             except (ValueError, TypeError, KeyError):
-                continue
-    return tuple(reversed(recent))
+                incomplete = True
+    return RetainedLog(tuple(reversed(recent)), LogRetention(rotated_at, clipped, incomplete))
 
 
 def _append_journal(path: Path, record: dict) -> bool:
@@ -163,7 +170,10 @@ def _append_journal(path: Path, record: dict) -> bool:
         if size + len(separator) + len(line) <= LOG_LIMIT_BYTES:
             journal.write(separator + line)
             return False
-    _replace_file(path, line)
+    rotated = _json_bytes({"journal_rotated_at": datetime.now().astimezone().isoformat()}) + line
+    if len(rotated) > LOG_LIMIT_BYTES:
+        raise OSError("单条日志与轮换标记超过 5 MB")
+    _replace_file(path, rotated)
     return True
 
 
@@ -211,6 +221,9 @@ class LocalHistory:
             return updated
 
     def recent_entries(self) -> tuple[JournalEntry, ...]:
+        return self.read_log().entries
+
+    def read_log(self) -> RetainedLog[JournalEntry]:
         with self._locked():
             return _read_journal(self.journal_path, _load_entry)
 
@@ -263,10 +276,7 @@ class _ServerJournal:
     directory: Path
     journal_path: Path
 
-    def _decode_event(self, line: bytes) -> ServerEvent:
-        data = json.loads(line)
-        if not isinstance(data, dict):
-            raise ValueError("Expected a server journal record")
+    def _decode_event(self, data: dict) -> ServerEvent:
         time = datetime.fromisoformat(_text(data, "time"))
         if "schema_version" not in data:
             details = {field: data[field] for field in self._legacy_detail_types}
@@ -291,6 +301,9 @@ class _ServerJournal:
         return ServerEvent(self._journal_protocol, endpoint, time, payload)
 
     def recent_events(self) -> tuple[ServerEvent, ...]:
+        return self.read_log().entries
+
+    def read_log(self) -> RetainedLog[ServerEvent]:
         with _locked(self.directory, self._journal_lock):
             return _read_journal(self.journal_path, self._decode_event)
 

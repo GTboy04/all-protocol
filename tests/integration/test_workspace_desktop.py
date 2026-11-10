@@ -1,11 +1,14 @@
 from dataclasses import replace
+import json
 import socket
-from time import monotonic
+from threading import Event
+from time import monotonic, sleep
+from zipfile import ZipFile
 
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, QTimer, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton, QTreeWidgetItemIterator
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QPushButton, QTreeWidgetItemIterator
 
 from all_protocol.adapters.modbus_tcp.client import ModbusTcpClient
 from all_protocol.adapters.modbus_tcp.model import Area, ModbusTarget
@@ -23,6 +26,7 @@ from all_protocol.storage import ConnectionProfile, VISIBLE_LOG_ROWS
 from all_protocol.ui.main_window import DesktopProtocol
 from all_protocol.ui.fault_dialog import FaultDialog
 from all_protocol.ui.modbus_tcp_form import ModbusTcpForm
+from all_protocol.ui.report_dialog import prepare_report
 from all_protocol.ui.role_window import RoleWindow
 from all_protocol.ui.s7_form import S7Form
 from all_protocol.ui.simulation_dialog import RuleDialog, SimulationDialog
@@ -188,6 +192,80 @@ def test_quick_write_evidence_follows_the_original_project_device(workspace):
     client.verify_selected.click()
     wait_for(lambda: "独立读取" in client.verification_state.text())
     assert sum(entry.write is not None for entry in client.journal.items) == 1
+
+
+def test_project_report_exports_the_preview_snapshot_while_both_devices_poll(workspace, monkeypatch, tmp_path):
+    _app, home, _ = workspace
+    window = home.project_window
+    client = window.client
+    window.resize(780, 620)
+    for _, pane in window.servers.panes():
+        pane.listen.click()
+    wait_for(lambda: window.listeners.text() == "监听 2/2")
+    select(window, "device", "mb")
+    client.connect_all_button.click()
+    wait_for(lambda: window.connections.text() == "连接 2/2")
+    for device in ("mb", "s7"):
+        select(window, "table", f"{device}-table")
+        client.point_table_pane.poll_button.click()
+    wait_for(lambda: {entry.device_id for entry in client.report_log().entries if entry.operation == "读取"} == {"mb", "s7"})
+
+    window.report_button.click()
+    dialog = window._report
+    assert not dialog.packets.isChecked() and not dialog.export_button.isEnabled()
+    dialog.packets.setChecked(True)
+    dialog.generate_button.click()
+    wait_for(dialog.export_button.isEnabled)
+    bundle = dialog._bundle
+    report = json.loads(bundle.json)
+    assert {item["source"] for item in report["records"]} == {"client", "modbus-tcp", "s7"}
+    assert report["scope"]["packets"] and "条记录" in dialog.preview.toPlainText()
+    log_page = next(index for index, page in enumerate(bundle.pages) if page.first_record)
+    dialog.pages.setCurrentIndex(log_page)
+    assert "127.0.0.1" in dialog.preview.toPlainText() and "RX" in dialog.preview.toPlainText()
+
+    def poll_ids():
+        return {device: next((entry.request_id for entry in client.report_log().entries
+                              if entry.device_id == device and entry.operation == "读取"), 0)
+                for device in ("mb", "s7")}
+
+    initial = poll_ids()
+    wait_for(lambda: all(value > initial[device] for device, value in poll_ids().items()))
+    path = tmp_path / "联调记录.zip"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_: (str(path), "报告包 (*.zip)"))
+    dialog.export_button.click()
+    wait_for(lambda: "已保存" in dialog.status.text())
+    with ZipFile(path) as archive:
+        assert archive.read("records.json") == bundle.json
+        assert archive.read("records.csv") == bundle.csv
+        assert archive.read("report.html") == bundle.html
+    dialog.reject()
+
+
+def test_project_report_cancels_background_preview_and_can_retry(workspace, monkeypatch):
+    _app, home, _ = workspace
+    window = home.project_window
+    started = Event()
+
+    def slow_preview(_snapshot, cancel):
+        started.set()
+        while True:
+            cancel.check()
+            sleep(.01)
+
+    monkeypatch.setattr("all_protocol.ui.report_dialog.prepare_report", slow_preview)
+    window.report_button.click()
+    dialog = window._report
+    dialog.generate_button.click()
+    wait_for(started.is_set)
+    assert dialog.cancel_button.isEnabled()
+    dialog.cancel_button.click()
+    wait_for(lambda: "任务已取消" in dialog.status.text())
+    assert not dialog.export_button.isEnabled()
+    monkeypatch.setattr("all_protocol.ui.report_dialog.prepare_report", prepare_report)
+    dialog.generate_button.click()
+    wait_for(dialog.export_button.isEnabled)
+    dialog.reject()
 
 
 def test_two_clients_two_listeners_switch_cancel_close_and_restore_without_running(workspace):
