@@ -15,5 +15,6 @@
 - R9 的验收分支为 `codex/r9-write-verification`，基于 R8 的 `0a9feee`。写入与自动回读作为同一设备队列的相邻操作。客户端日志保存结构化写入和验证证据，独立核对通过原写入的会话与请求 ID 关联。全量 233 项测试通过。 [R9 验收细节](requirements/R9-write-verification.md)
 - R10 的验收分支为 `codex/r10-reports`，基于 R9 的 `09c30a7`。项目工作区冻结配置与有界日志后在后台生成预览和报告包，客户端按设备 ID 匹配，服务端按本次工作区采集。全量 240 项测试通过。 [R10 验收细节](requirements/R10-reports.md)
 - R1–R10 开发路线已完成。
+- 功能测试修复 `2f075ee` 已快进合并到本地 `main`，包含 Modbus TCP / S7 响应校验和项目报告修复，全量 245 项测试通过。下一阶段见[协议扩展开发路线](requirements/protocol-expansion.md)。
 - 常用命令：`.venv/Scripts/python.exe -m pytest -q`、`git diff --check`。离屏截图需显式加载系统 msyh.ttc；产品字体不变。
 - Git：每项独立分支与提交，不自动合并或推送，结束时保持干净工作区。
