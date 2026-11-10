@@ -38,21 +38,43 @@ def _address(target: S7Target, *, bit_access: bool) -> bytes:
             + bit_address.to_bytes(3, "big"))
 
 
+class _S7StreamProtocol(asyncio.StreamReaderProtocol):
+    def __init__(self, reader, disconnected):
+        super().__init__(reader)
+        self._disconnected = disconnected
+
+    def eof_received(self):
+        super().eof_received()
+        return False
+
+    def connection_lost(self, exc):
+        super().connection_lost(exc)
+        self._disconnected()
+
+
 class S7Client:
     def __init__(self, config: S7Config, events: ClientEvents):
         self._config = config
         self._events = events
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
+        self._transport_closed = False
+        self._request_active = False
         self._reference = 0
         self._tpdu_size = 1 << REQUESTED_TPDU_EXPONENT
         self._pdu_size = REQUESTED_PDU
 
     async def connect(self):
         self._config.validate()
+        self._transport_closed = False
         try:
             async with asyncio.timeout(self._config.timeout_ms / 1000):
-                self._reader, self._writer = await asyncio.open_connection(self._config.host, self._config.port)
+                loop = asyncio.get_running_loop()
+                reader = asyncio.StreamReader()
+                protocol = _S7StreamProtocol(reader, self._transport_lost)
+                transport, _ = await loop.create_connection(lambda: protocol, self._config.host, self._config.port)
+                self._reader = reader
+                self._writer = asyncio.StreamWriter(transport, protocol, reader, loop)
                 # Class 0 connection request, source reference 1, local TSAP 0x0100.
                 request = bytes.fromhex("11 E0 00 00 00 01 00 C1 02 01 00 C2 02")
                 request += struct.pack(">HBBB", self._config.remote_tsap, 0xC0, 1, REQUESTED_TPDU_EXPONENT)
@@ -66,6 +88,8 @@ class S7Client:
                 if not caller or not callee or not 24 <= pdu_size <= REQUESTED_PDU:
                     raise ClientError(ErrorKind.RESPONSE, "S7 通信协商参数超出范围")
                 self._pdu_size = pdu_size
+                if self._transport_closed:
+                    raise ClientError(ErrorKind.CONNECT, "S7 对端已关闭 TCP 连接")
         except TimeoutError as error:
             raise ClientError(ErrorKind.TIMEOUT, "S7 连接握手超时") from error
         except (OSError, asyncio.IncompleteReadError) as error:
@@ -110,6 +134,7 @@ class S7Client:
             raise ClientError(ErrorKind.INPUT, "当前连接协商的报文容量较小，请减少点位数量")
 
     async def _request(self, params: bytes, data: bytes = b"", *, read_size: int = 0) -> bytes:
+        self._request_active = True
         try:
             async with asyncio.timeout(self._config.timeout_ms / 1000):
                 reply, payload = await self._exchange(params, data)
@@ -136,11 +161,23 @@ class S7Client:
         except (OSError, asyncio.IncompleteReadError) as error:
             self._invalidate_connection()
             raise ClientError(ErrorKind.DISCONNECTED, "S7 TCP 连接已中断") from error
+        finally:
+            self._request_active = False
+            if self._transport_closed and self._writer is not None:
+                self._events.disconnected()
 
     def _invalidate_connection(self):
+        self._transport_lost()
         if self._writer is not None:
             self._writer.close()
-        self._events.disconnected()
+
+    def _transport_lost(self):
+        if self._transport_closed:
+            return
+        self._transport_closed = True
+        # Let an active request interpret any final reply before the session shuts down.
+        if not self._request_active and self._writer is not None:
+            self._events.disconnected()
 
     async def _exchange(self, params: bytes, data: bytes = b"") -> tuple[bytes, bytes]:
         self._reference = self._reference % 65535 + 1

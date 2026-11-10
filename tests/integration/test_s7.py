@@ -88,7 +88,7 @@ def _response(request, params, data=b""):
     return b"\x32\x03\x00\x00" + request[7:9] + struct.pack(">HHH", len(params), len(data), 0) + params + data
 
 
-@pytest.mark.parametrize("fault", [None, "timeout", "wrong_reference", "eof"])
+@pytest.mark.parametrize("fault", [None, "timeout", "wrong_reference", "eof", "eof_after_ack"])
 def test_s7_native_bit_write_and_write_acknowledgement(fault):
     async def run():
         handled = asyncio.get_running_loop().create_future()
@@ -104,12 +104,12 @@ def test_s7_native_bit_write_and_write_acknowledgement(fault):
                 writer.write(_tpkt(b"\x02\xF0\x80" + setup_ack[8:]))
                 write = await _frame(reader)
                 assert write[13:] == bytes.fromhex("05 01 12 0A 10 01 00 01 00 01 84 00 00 17 00 03 00 01 01")
-                if fault in (None, "wrong_reference"):
+                if fault in (None, "wrong_reference", "eof_after_ack"):
                     reply = _response(write, b"\x05\x01", b"\xFF")
-                    if fault:
+                    if fault == "wrong_reference":
                         reply = reply[:4] + b"\x00\x07" + reply[6:]
                     writer.write(_tpkt(b"\x02\xF0\x80" + reply))
-                if fault != "eof":
+                if fault not in ("eof", "eof_after_ack"):
                     assert await reader.read() == b""
             except Exception as error:
                 handled.set_exception(error)
@@ -127,7 +127,7 @@ def test_s7_native_bit_write_and_write_acknowledgement(fault):
             assert events[-1].connection == ConnectionState.ONLINE
             await session.execute(Command(S7Target(Area.DB, 1, 2, DataType.BOOL, bit=7), (True,)))
             entry = next(event for event in events if isinstance(event, JournalEntry) and event.operation == "写入")
-            if fault is None:
+            if fault in (None, "eof_after_ack"):
                 assert entry.outcome == "设备已应答"
                 await session.disconnect()
             else:

@@ -17,7 +17,7 @@ MODBUS = ProtocolRegistration("modbus-tcp", "Modbus TCP", ModbusTcpClient, True)
 
 
 @asynccontextmanager
-async def tcp_peer(reply, timeout_ms=120):
+async def tcp_peer(reply, timeout_ms=120, *, split_at=0, drop_tail=False):
     """Independent Modbus TCP peer with controllable faults."""
     received = []
     clients = {}
@@ -35,7 +35,15 @@ async def tcp_peer(reply, timeout_ms=120):
                 if response is False:
                     return
                 if response is not None:
-                    writer.write(struct.pack(">HHHB", transaction, 0, len(response) + 1, unit) + response)
+                    frame = struct.pack(">HHHB", transaction, 0, len(response) + 1, unit) + response
+                    if split_at:
+                        writer.write(frame[:split_at])
+                        await writer.drain()
+                        if drop_tail:
+                            continue
+                        await asyncio.sleep(.05)
+                        frame = frame[split_at:]
+                    writer.write(frame)
                     await writer.drain()
         except (asyncio.IncompleteReadError, ConnectionError):
             pass
@@ -120,6 +128,30 @@ def test_four_areas_and_unit_ids_with_real_tcp():
             assert {direction for direction, _ in entries(events)[-1].packets} == {True, False}
             await session.disconnect()
             assert last_state(events).connection == ConnectionState.OFFLINE
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize(("split_at", "drop_tail"), [(5, False), (9, False), (9, True)])
+def test_fragmented_modbus_response_is_logged_once(split_at, drop_tail):
+    async def exercise():
+        async with tcp_peer(lambda *_: b"\x03\x02\x00\x19", timeout_ms=300,
+                            split_at=split_at, drop_tail=drop_tail) as (config, _):
+            events = []
+            session = Session(events.append)
+            await session.connect(MODBUS, config, config.endpoint)
+            try:
+                successful = await session.execute(Command(ModbusTarget(1, Area.HR, 0, 1)))
+                frame = bytes.fromhex("00 01 00 00 00 05 01 03 02 00 19")
+                entry = entries(events)[-1]
+                assert successful == (not drop_tail)
+                if drop_tail:
+                    assert entry.error == ErrorKind.RESPONSE
+                    frame = frame[:split_at]
+                else:
+                    assert readings(events)[-1].points[0].value == 25
+                assert [data for sending, data in entry.packets if not sending] == [frame]
+            finally:
+                await session.disconnect()
     asyncio.run(exercise())
 
 

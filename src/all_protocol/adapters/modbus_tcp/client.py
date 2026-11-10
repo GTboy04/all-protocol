@@ -15,6 +15,7 @@ class ModbusTcpClient:
         config.validate()
         self._events = events
         self._received = False
+        self._partial_response = b""
         self._transaction_id = 0
         self._client = AsyncModbusTcpClient(
             config.host, port=config.port, timeout=config.timeout_ms / 1000,
@@ -27,8 +28,20 @@ class ModbusTcpClient:
             self._transaction_id = int.from_bytes(data[:2], "big")
         else:
             self._received = True
+            if not data.startswith(self._partial_response):
+                self._flush_partial_response()
+            # The packet hook sees the receive buffer again when another TCP segment arrives.
+            if len(data) < 8 or (data[2:4] == b"\0\0" and len(data) < 6 + int.from_bytes(data[4:6], "big")):
+                self._partial_response = data
+                return data
+            self._partial_response = b""
         self._events.packet(sending, data)
         return data
+
+    def _flush_partial_response(self):
+        if self._partial_response:
+            self._events.packet(False, self._partial_response)
+            self._partial_response = b""
 
     def _trace_connect(self, connected: bool):
         if not connected:
@@ -52,6 +65,7 @@ class ModbusTcpClient:
         if not self._client.connected:
             raise ClientError(ErrorKind.DISCONNECTED, "TCP 连接已关闭")
         self._received = False
+        self._partial_response = b""
         try:
             response = await operation(*args, device_id=device_id, **kwargs)
         except (ConnectionException, OSError) as error:
@@ -64,6 +78,8 @@ class ModbusTcpClient:
             raise ClientError(kind, detail) from error
         except ModbusException as error:
             raise ClientError(ErrorKind.RESPONSE, str(error)) from error
+        finally:
+            self._flush_partial_response()
         if response.transaction_id != self._transaction_id or response.dev_id != device_id:
             raise ClientError(ErrorKind.RESPONSE, "响应事务 ID 或 Unit ID 与请求不一致")
         if response.function_code not in (code, code | 0x80):

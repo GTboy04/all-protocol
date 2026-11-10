@@ -332,7 +332,8 @@ def _record_row(record):
     if record.get("packets"):
         packets = "\n".join(f"{item['direction']}  {item['hex']}" for item in record["packets"])
         evidence += f"<pre>{_text(packets)}</pre>"
-    return (f'<tr id="record-{index}" data-record="{index}"><td>{index}<br>{_text(record["time"])}</td>'
+    return (f'<tr data-record="{index}"><td><a id="record-{index}" name="record-{index}"></a>'
+            f'{index}<br>{_text(record["time"])}</td>'
             f"<td>{_text(context)}</td><td>{_text(address)}</td><td>{_text(result)}</td><td>{evidence or '—'}</td></tr>")
 
 

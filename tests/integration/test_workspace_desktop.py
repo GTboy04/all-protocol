@@ -6,7 +6,7 @@ from time import monotonic, sleep
 from zipfile import ZipFile
 
 import pytest
-from PySide6.QtCore import QCoreApplication, QEvent, QTimer, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QTimer, Qt, QUrl
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QPushButton, QTreeWidgetItemIterator
 
@@ -192,6 +192,48 @@ def test_quick_write_evidence_follows_the_original_project_device(workspace):
     client.verify_selected.click()
     wait_for(lambda: "独立读取" in client.verification_state.text())
     assert sum(entry.write is not None for entry in client.journal.items) == 1
+
+    window.report_button.click()
+    report = window._report
+    report.servers.setChecked(False)
+    report.preview.setFixedHeight(75)
+    report.generate_button.click()
+    wait_for(report.export_button.isEnabled)
+    records = json.loads(report._bundle.json)["records"]
+    original = next(record["verification"]["original_row"] for record in records if record["verification"])
+    log_page = next(index for index, page in enumerate(report._bundle.pages) if page.first_record)
+    report.pages.setCurrentIndex(log_page)
+    link = f"#record-{original}"
+    assert link in report.preview.toHtml()
+    scrollbar = report.preview.verticalScrollBar()
+    scrollbar.setValue(0)
+    report.preview.anchorClicked.emit(QUrl(link))
+    assert scrollbar.value() > 0
+    report.reject()
+
+
+def test_stopping_s7_listener_disconnects_idle_client_and_allows_reconnect(workspace):
+    _app, home, _ = workspace
+    window = home.project_window
+    client = window.client
+    panes = {registration.key: pane for registration, pane in window.servers.panes()}
+    for pane in panes.values():
+        pane.listen.click()
+    wait_for(lambda: window.listeners.text() == "监听 2/2")
+    select(window, "device", "s7")
+    client.connect_all_button.click()
+    wait_for(lambda: window.connections.text() == "连接 2/2")
+
+    panes["s7"].listen.click()
+    wait_for(lambda: window.listeners.text() == "监听 1/2")
+    wait_for(lambda: window.connections.text() == "连接 1/2")
+    assert client.workspace_device_status("mb")[0] == ConnectionState.ONLINE
+    assert client.workspace_device_status("s7")[0] == ConnectionState.OFFLINE
+
+    panes["s7"].listen.click()
+    wait_for(lambda: window.listeners.text() == "监听 2/2")
+    client.connection_button.click()
+    wait_for(lambda: window.connections.text() == "连接 2/2")
 
 
 def test_project_report_exports_the_preview_snapshot_while_both_devices_poll(workspace, monkeypatch, tmp_path):
