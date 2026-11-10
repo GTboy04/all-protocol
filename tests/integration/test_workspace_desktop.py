@@ -5,7 +5,7 @@ from time import monotonic
 import pytest
 from PySide6.QtCore import QCoreApplication, QEvent, QTimer, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QPushButton, QTreeWidgetItemIterator
 
 from all_protocol.adapters.modbus_tcp.client import ModbusTcpClient
 from all_protocol.adapters.modbus_tcp.model import Area, ModbusTarget
@@ -14,12 +14,14 @@ from all_protocol.adapters.s7.client import S7Client
 from all_protocol.adapters.s7.model import Area as S7Area, DataType, S7Target
 from all_protocol.adapters.s7.server_model import S7ServerPlan, S7ServerPoint
 from all_protocol.application.contracts import ConnectionState, ProtocolRegistration
+from all_protocol.application.faults import FaultAction
 from all_protocol.application.server_contracts import ListenerState
 from all_protocol.application.simulation import RuleKind, SimulationState
 from all_protocol.point_tables import PointDefinition, PointTable
 from all_protocol.project import Project, ProjectDevice, ProjectFile, ProjectWorkspace, WorkspaceLayout
-from all_protocol.storage import ConnectionProfile
+from all_protocol.storage import ConnectionProfile, VISIBLE_LOG_ROWS
 from all_protocol.ui.main_window import DesktopProtocol
+from all_protocol.ui.fault_dialog import FaultDialog
 from all_protocol.ui.modbus_tcp_form import ModbusTcpForm
 from all_protocol.ui.role_window import RoleWindow
 from all_protocol.ui.s7_form import S7Form
@@ -92,6 +94,65 @@ def workspace(monkeypatch, tmp_path):
 
 def select(window, kind, key):
     window.tree.setCurrentItem(window._items[kind, key])
+
+
+def test_project_diagnostics_highlights_raw_bytes_while_sampling_and_shows_fault_status(workspace):
+    app, home, _ = workspace
+    window = home.project_window
+    client = window.client
+    pane = next(pane for registration, pane in window.servers.panes() if registration.key == "modbus-tcp")
+    assert not pane.fault_button.isEnabled()
+    pane.listen.click()
+    wait_for(pane.fault_button.isEnabled)
+    select(window, "device", "mb")
+    client.connection_button.click()
+    wait_for(lambda: client._state.connection == ConnectionState.ONLINE)
+    select(window, "table", "mb-table")
+    client.point_table_pane.poll_button.click()
+    wait_for(lambda: any(entry.operation == "读取" for entry in client.journal.items))
+    entry = next(entry for entry in client.journal.items if entry.operation == "读取")
+    client.log_table.setCurrentIndex(client.journal.index(client.journal.items.index(entry), 0))
+    incomplete = replace(entry, request_id=9000, packets=((True, b"\x00\x01\x00"),))
+    client._all_entries.append(incomplete)
+    client._all_entries.extend(replace(entry, request_id=entry.request_id + 10000 + i)
+                               for i in range(VISIBLE_LOG_ROWS - len(client._all_entries)))
+    button = next(button for button in client.journal_panel.findChildren(QPushButton)
+                  if button.text() == "请求诊断…")
+    button.click()
+    dialog = client._diagnostics
+    assert dialog.device.currentData() == ("mb",)
+    assert dialog.model.rowCount() == VISIBLE_LOG_ROWS
+    assert entry.session_id in dialog.context.text()
+    item = QTreeWidgetItemIterator(dialog.tree)
+    while item.value() and item.value().text(0) != "功能码":
+        item += 1
+    assert item.value() is not None
+    dialog.tree.setCurrentItem(item.value())
+    assert dialog.hex.extraSelections()[0].cursor.selectedText() == "03"
+    incomplete_row = next(i for i, (key, _) in enumerate(dialog.model.items) if key == id(incomplete))
+    dialog.table.setCurrentIndex(dialog.model.index(incomplete_row, 0))
+    error = dialog.tree.topLevelItem(dialog.tree.topLevelItemCount() - 1)
+    assert error.text(0) == "解析失败" and "偏移 3" in error.text(1)
+    assert dialog.hex.toPlainText().endswith("00 01 00")
+
+    def apply_fault():
+        form = app.activeModalWidget()
+        assert isinstance(form, FaultDialog)
+        form.action.setCurrentText(FaultAction.EXCEPTION)
+        form.operation.setCurrentText("读取")
+        form.accept()
+
+    QTimer.singleShot(0, apply_fault)
+    pane.fault_button.click()
+    wait_for(lambda: "已触发 1 次" in pane.fault_status.text())
+    assert "已结束" in pane.fault_status.text()
+    dialog.error.setCurrentIndex(dialog.error.findData("协议异常"))
+    wait_for(lambda: dialog.model.rowCount() == 1)
+    assert "失败 100.0%" in dialog.stats.text()
+    wait_for(lambda: client._sample_stores["mb"].samples["mb-table", "mb-point"].request_id > entry.request_id + 1)
+    dialog.close()
+    pane.reset_fault.click()
+    wait_for(lambda: pane.fault_status.text() == "故障未启用")
 
 
 def test_two_clients_two_listeners_switch_cancel_close_and_restore_without_running(workspace):

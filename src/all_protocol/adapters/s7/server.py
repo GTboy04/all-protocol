@@ -3,8 +3,10 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
 import struct
+from time import monotonic
 
-from ...application.contracts import ClientError, Value
+from ...application.contracts import ClientError, ErrorKind, Value
+from ...application.faults import FaultAction, FaultOperation
 from .model import Area
 from .server_model import S7Memory, S7ServerPlan, S7ValuesChanged
 from .wire import COTP_DATA, READ_VAR, REQUESTED_PDU, REQUESTED_TPDU_EXPONENT, SETUP, WRITE_VAR, read_tpkt, tpkt
@@ -27,6 +29,8 @@ class S7ServerRequest:
     result: str
     rx: bytes = b""
     tx: bytes = b""
+    elapsed_ms: int | None = None
+    error: ErrorKind | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,12 +138,13 @@ def _write_items(data: bytes, count: int) -> list[tuple[int, int, bytes]]:
 
 
 class S7Server:
-    def __init__(self, plan: S7ServerPlan, changed, record):
+    def __init__(self, plan: S7ServerPlan, changed, record, fault=None):
         self._plan = plan
         self._points = {point.target: point for point in plan.points}
         self._memory = S7Memory(plan.points)
         self._changed = changed
         self._record = record
+        self._fault = fault
         self._listener: asyncio.Server | None = None
         self._clients: dict[asyncio.Task, asyncio.StreamWriter] = {}
         self._stopping = False
@@ -188,10 +193,15 @@ class S7Server:
         peer = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
         rx = bytearray()
 
-        async def send(response: bytes, function: int | None, target: str, result: str):
-            writer.write(response)
-            self._record(S7ServerRequest(datetime.now(), peer, function, target, result, bytes(rx), response))
+        def record(function, target, result, response=b"", *, started=None, error=None):
+            elapsed = None if started is None else round((monotonic() - started) * 1000)
+            self._record(S7ServerRequest(datetime.now(), peer, function, target, result, bytes(rx),
+                                         response, elapsed, error))
             rx.clear()
+
+        async def send(response: bytes, function: int | None, target: str, result: str, **metadata):
+            writer.write(response)
+            record(function, target, result, response, **metadata)
             await writer.drain()
 
         try:
@@ -211,13 +221,39 @@ class S7Server:
                 await send(self._frames(reply, tpdu_size), SETUP, "通信协商", f"PDU {pdu_size} B")
             while True:
                 request = await self._read_job(reader, tpdu_size, pdu_size, rx)
+                started = monotonic()
                 reference, params, data = self._job(request)
                 function = params[0]
-                response, target, result = self._respond(reference, params, data, pdu_size)
-                await send(self._frames(response, tpdu_size), function, target, result)
+                hit = None
+                if function in (READ_VAR, WRITE_VAR) and self._fault is not None:
+                    operation = FaultOperation.READ if function == READ_VAR else FaultOperation.WRITE
+                    hit = self._fault(operation)
+                action = hit.rule.action if hit else None
+                if action == FaultAction.DISCONNECT:
+                    record(function, "", "故障注入 · 主动断开", started=started, error=ErrorKind.DISCONNECTED)
+                    return
+                if action == FaultAction.EXCEPTION:
+                    response, target, result = _ack(reference, error=0x8104), "", "异常 0x8104"
+                else:
+                    response, target, result = self._respond(reference, params, data, pdu_size)
+                error = ErrorKind.PROTOCOL if result != "成功" else None
+                if action == FaultAction.DELAY:
+                    try:
+                        await hit.wait()
+                    except asyncio.CancelledError:
+                        record(function, target, "故障注入 · 延迟应答中止",
+                               started=started, error=ErrorKind.DISCONNECTED)
+                        raise
+                    if reader.at_eof() or writer.is_closing():
+                        record(function, target, "故障注入 · 延迟期间连接中断",
+                               started=started, error=ErrorKind.DISCONNECTED)
+                        return
+                if hit is not None:
+                    result = f"故障注入 · {action} · {result}"
+                await send(self._frames(response, tpdu_size), function, target, result, started=started, error=error)
         except (ClientError, ValueError, TimeoutError, asyncio.IncompleteReadError, OSError) as error:
             if rx:
-                self._record(S7ServerRequest(datetime.now(), peer, None, "", str(error), bytes(rx)))
+                record(None, "", str(error), error=ErrorKind.RESPONSE)
         finally:
             writer.close()
             with suppress(OSError):

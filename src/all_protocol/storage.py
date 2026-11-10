@@ -194,9 +194,18 @@ def _text(data: dict, field: str) -> str:
 
 
 def _request_metadata(data: dict, details: dict) -> RequestMetadata:
+    elapsed = data.get("elapsed_ms")
+    if elapsed is not None and (type(elapsed) is not int or elapsed < 0):
+        raise ValueError("Invalid server request duration")
+    error = data.get("error")
+    session_id = _text(data, "session_id") if "session_id" in data else ""
+    request_id = data.get("request_id")
+    if request_id is not None and (type(request_id) is not int or request_id < 1):
+        raise ValueError("Invalid server request ID")
     return RequestMetadata(
         _text(data, "peer"), _text(data, "result"),
         bytes.fromhex(_text(data, "rx")), bytes.fromhex(_text(data, "tx")), tuple(details.items()),
+        elapsed, ErrorKind(error) if error is not None else None, session_id, request_id,
     )
 
 
@@ -246,7 +255,8 @@ class _ServerJournal:
         payload = event.payload
         if isinstance(payload, RequestMetadata):
             record.update(kind="request", peer=payload.peer, result=payload.result, rx=payload.rx.hex(),
-                          tx=payload.tx.hex(), details=dict(payload.details))
+                          tx=payload.tx.hex(), details=dict(payload.details), elapsed_ms=payload.elapsed_ms,
+                          error=payload.error, session_id=payload.session_id, request_id=payload.request_id)
         elif isinstance(payload, ServerLifecycle):
             record.update(kind="lifecycle", action=payload.action, result=payload.result)
         else:

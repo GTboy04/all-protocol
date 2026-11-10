@@ -1,9 +1,13 @@
 import asyncio
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
+from itertools import count
 from time import monotonic
+from uuid import uuid4
 
 from .contracts import Value
+from .faults import FaultInjector, FaultRule
 from .server_contracts import (
     LifecycleAction, ListenerState, ListenerUpdate, RequestMetadata, RuntimeChange,
     ServerAdapter, ServerCallbacks, ServerCapability, ServerEvent, ServerLifecycle, ServerRegistration,
@@ -18,11 +22,14 @@ class ServerSession:
         self._adapter: ServerAdapter | None = None
         self._state = ListenerState.STOPPED
         self._endpoint = ""
+        self._session_id = ""
+        self._request_ids = count(1)
         self._lifecycle = asyncio.Lock()
         self._clock = clock
         self._simulation: Simulation | None = None
         self._simulation_task: asyncio.Task | None = None
         self._simulating_write = False
+        self._faults = FaultInjector(clock, self._publish)
 
     def _publish(self, payload, time: datetime | None = None):
         self._emit(ServerEvent(self._registration.key, self._endpoint, time or datetime.now(), payload))
@@ -32,7 +39,7 @@ class ServerSession:
         self._publish(ListenerUpdate(state, error))
 
     def _request(self, time: datetime, metadata: RequestMetadata):
-        self._publish(metadata, time)
+        self._publish(replace(metadata, session_id=self._session_id, request_id=next(self._request_ids)), time)
 
     def _changed(self, details: object):
         self._publish(RuntimeChange(details))
@@ -66,6 +73,8 @@ class ServerSession:
             await self._adapter.shutdown()
             self._adapter = None
         self._simulation = None
+        if self._faults.update.rule is not None:
+            self._faults.configure(None)
 
     async def start(self, plan: object):
         async with self._lifecycle:
@@ -75,7 +84,10 @@ class ServerSession:
             try:
                 await self._shutdown()
                 self._endpoint = ""
-                adapter = self._registration.create_adapter(plan, ServerCallbacks(self._request, self._changed, self._written))
+                self._session_id = str(uuid4())
+                self._request_ids = count(1)
+                callbacks = ServerCallbacks(self._request, self._changed, self._written, self._faults.claim)
+                adapter = self._registration.create_adapter(plan, callbacks)
                 self._endpoint = adapter.endpoint
                 adapter.validate_plan()
                 points = self._registration.simulation_points
@@ -142,6 +154,10 @@ class ServerSession:
             await self.write_current(target, value)
         except ValueError as error:
             self._update(self._state, str(error))
+
+    async def configure_fault(self, rule: FaultRule | None):
+        if self._state == ListenerState.LISTENING:
+            self._faults.configure(rule)
 
     async def control_simulation(self, command: SimulationCommand, target=None):
         simulation = self._simulation

@@ -6,6 +6,7 @@ from datetime import datetime
 from itertools import count
 from time import monotonic
 from typing import cast
+from uuid import uuid4
 
 from .contracts import (
     Client, ClientError, ClientEvents, Command, ConnectionState, ErrorKind,
@@ -55,6 +56,7 @@ class Session:
         entry = JournalEntry(request_id, datetime.now(), operation, target, function,
                              round((monotonic() - start) * 1000), outcome, error, detail, packets,
                              protocol=self._protocol, endpoint=self._state.endpoint, operation_id=operation_id,
+                             session_id=self._state.session_id,
                              generation=self._generation if generation is None else generation)
         self._emit(entry)
         return entry
@@ -68,7 +70,8 @@ class Session:
         self._connection_lost = False
         self._protocol = protocol.key
         self._writable = protocol.writable
-        self._update(connection=ConnectionState.CONNECTING, endpoint=endpoint, generation=generation)
+        self._update(connection=ConnectionState.CONNECTING, endpoint=endpoint, generation=generation,
+                     session_id=str(uuid4()))
         # Only the owned handshake task is cancelled by disconnect, not its caller.
         self._task = asyncio.create_task(self._connect(protocol, config, endpoint, generation))
         try:

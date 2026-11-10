@@ -3,6 +3,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from time import monotonic
 
 from pymodbus.constants import ExcCodes
 from pymodbus.exceptions import ModbusIOException
@@ -11,7 +12,8 @@ from pymodbus.server import ModbusTcpServer
 from pymodbus.server.base import ModbusBaseServer
 from pymodbus.server.requesthandler import ServerRequestHandler
 
-from ...application.contracts import Value
+from ...application.contracts import ErrorKind, Value
+from ...application.faults import FaultAction, FaultOperation
 from .model import RULES, Area
 from .server_model import ServerPlan
 
@@ -42,6 +44,8 @@ class ServerRequest:
     result: str
     rx: bytes = b""
     tx: bytes = b""
+    elapsed_ms: int | None = None
+    error: ErrorKind | None = None
 
 
 class RuntimeValues:
@@ -89,6 +93,7 @@ class _Connection(ServerRequestHandler):
     def __init__(self, server):
         super().__init__(server, None, None, None)
         self.rejecting = False
+        self.requests: set[asyncio.Task] = set()
 
     def connection_made(self, transport):
         if self.is_closing:
@@ -114,41 +119,91 @@ class _Connection(ServerRequestHandler):
             frames.append(data[cursor:end])
             cursor = end
         self.recv_buffer = b"" if self.rejecting else data[cursor:]
-        if frames or self.rejecting:
-            task = self.loop.create_task(self._process(frames, self.rejecting))
-            self.server.requests.add(task)
-            task.add_done_callback(self.server.requests.discard)
+        for frame in frames:
+            self._track(self._process(frame))
+        if self.rejecting:
+            self._track(self._reject(data[cursor:]))
 
-    async def _process(self, frames: list[bytes], close_after: bool):
+    def _track(self, request):
+        task = self.loop.create_task(request)
+        self.server.requests.add(task)
+        task.add_done_callback(self.server.requests.discard)
+        self.requests.add(task)
+        task.add_done_callback(self.requests.discard)
+
+    def _peer(self):
+        host, port = self.transport.get_extra_info("peername")[:2]
+        return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+    def connection_lost(self, exc):
+        if self.transport is not None and self.recv_buffer:
+            self.server.record(ServerRequest(datetime.now(), self._peer(), None, None, None, None,
+                                             "残缺的 Modbus TCP 报文", self.recv_buffer, error=ErrorKind.RESPONSE))
+        for task in self.requests:
+            task.cancel()
+        super().connection_lost(exc)
+
+    async def _process(self, rx: bytes):
         if self.transport is None:
             return
-        peer = self.transport.get_extra_info("peername")
-        host, port = peer[:2]
-        source = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
-        for rx in frames:
-            transaction = int.from_bytes(rx[:2], "big")
-            unit, function = rx[6:8]
-            pdu = rx[7:]
-            offset = int.from_bytes(pdu[1:3], "big") if function in AREAS and len(pdu) >= 3 else None
-            count = (1 if function in SINGLE_WRITES else int.from_bytes(pdu[3:5], "big")
-                     if function in AREAS and len(pdu) >= 5 else None)
+        source = self._peer()
+        started = monotonic()
+        transaction = int.from_bytes(rx[:2], "big")
+        unit, function = rx[6:8]
+        pdu = rx[7:]
+        offset = int.from_bytes(pdu[1:3], "big") if function in AREAS and len(pdu) >= 3 else None
+        count = (1 if function in SINGLE_WRITES else int.from_bytes(pdu[3:5], "big")
+                 if function in AREAS and len(pdu) >= 5 else None)
+
+        def record(result, tx=b"", error=None):
+            self.server.record(ServerRequest(datetime.now(), source, unit, function, offset, count, result,
+                                             rx, tx, round((monotonic() - started) * 1000), error))
+
+        hit = None
+        if function in AREAS and self.server.fault is not None:
+            operation = FaultOperation.READ if function in READ_AREAS else FaultOperation.WRITE
+            hit = self.server.fault(operation)
+        action = hit.rule.action if hit else None
+        if action == FaultAction.DISCONNECT:
+            record("故障注入 · 主动断开", error=ErrorKind.DISCONNECTED)
+            self.close()
+            return
+        if action == FaultAction.EXCEPTION:
+            response = ExceptionResponse(function, ExcCodes.ILLEGAL_VALUE)
+        else:
             response = await self.server.respond(unit, pdu)
-            response.dev_id = unit
-            response.transaction_id = transaction
-            tx = self.framer.buildFrame(response)
-            self.send(tx)
-            result = f"异常 0x{response.exception_code:02X}" if response.isError() else "成功"
-            self.server.record(ServerRequest(datetime.now(), source, unit, function, offset, count, result, rx, tx))
-        if close_after:
+        if action == FaultAction.DELAY:
+            try:
+                await hit.wait()
+            except asyncio.CancelledError:
+                record("故障注入 · 延迟应答中止", error=ErrorKind.DISCONNECTED)
+                raise
+        if self.transport is None:
+            record("应答发送前连接中断", error=ErrorKind.DISCONNECTED)
+            return
+        response.dev_id = unit
+        response.transaction_id = transaction
+        tx = self.framer.buildFrame(response)
+        self.send(tx)
+        result = f"异常 0x{response.exception_code:02X}" if response.isError() else "成功"
+        if hit is not None:
+            result = f"故障注入 · {action} · {result}"
+        record(result, tx, ErrorKind.PROTOCOL if response.isError() else None)
+
+    async def _reject(self, invalid: bytes):
+        if self.transport is not None:
+            self.server.record(ServerRequest(datetime.now(), self._peer(), None, None, None, None,
+                                             "无效的 MBAP 报文头", invalid, error=ErrorKind.RESPONSE))
             self.close()
 
 
 class TcpServer(ModbusTcpServer):
-    def __init__(self, plan: ServerPlan, changed, record):
+    def __init__(self, plan: ServerPlan, changed, record, fault=None):
         super().__init__([], address=(plan.host, plan.port))
         # Use PyModbus PDU datastore operations with exact Unit IDs and sparse bit addresses.
         self.context = RuntimeValues(plan, changed)
         self.record = record
+        self.fault = fault
         self.requests: set[asyncio.Task] = set()
 
     def callback_new_connection(self):
@@ -162,11 +217,12 @@ class TcpServer(ModbusTcpServer):
 
     async def shutdown(self):
         listener = self.transport
-        for task in self.requests:
+        requests = tuple(self.requests)
+        for task in requests:
             task.cancel()
         await super().shutdown()
-        if self.requests:
-            await asyncio.gather(*self.requests, return_exceptions=True)
+        if requests:
+            await asyncio.gather(*requests, return_exceptions=True)
         if listener is not None:
             await listener.wait_closed()
         if ModbusBaseServer.active_server is self:

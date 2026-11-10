@@ -15,6 +15,7 @@ from ..application.contracts import (
     BatchResult, ClientError, Command, ConnectionState, DeviceEvent, DeviceRemoved, JournalEntry, OperationRejected, Point, ProtocolRegistration,
     ReadUpdate, SessionState, TableReadUpdate, Target, Value,
 )
+from ..application.diagnostics import DiagnosticRow
 from ..application.session_manager import SessionManager
 from ..application.sampling import SampleStore
 from ..project import validate_profile
@@ -162,6 +163,7 @@ class MainWindow(QMainWindow):
         self._last_reads = {}
         self._quick_values = {}
         self._all_entries = []
+        self._diagnostics = None
         self._pending_removals = {}
         self._device_errors = {}
         self._connection_configs = {}
@@ -471,6 +473,9 @@ class MainWindow(QMainWindow):
         self.journal_panel, journal_layout = _panel()
         if not self._embedded:
             journal_layout.addWidget(_heading("请求日志"))
+        diagnostics = QPushButton("请求诊断…")
+        diagnostics.clicked.connect(self._open_diagnostics)
+        journal_layout.addWidget(diagnostics, alignment=Qt.AlignmentFlag.AlignLeft)
         journal_layout.addWidget(self.log_table)
         journal_layout.addWidget(self.detail)
         if self._embedded:
@@ -987,13 +992,35 @@ class MainWindow(QMainWindow):
                  f"#{entry.request_id}  {entry.operation}  {entry.target}  {entry.outcome}"]
         if entry.operation_id is not None:
             lines.append(f"任务 #{entry.operation_id}")
-        if entry.device_id:
-            lines.append(f"设备 {entry.device_id}  会话 {entry.session_id}  代次 {entry.generation}")
+        if entry.session_id:
+            lines.append("  ".join(filter(None, (f"设备 {entry.device_id}" if entry.device_id else "",
+                                                   f"会话 {entry.session_id}  代次 {entry.generation}"))))
         if entry.detail:
             lines.append(entry.detail)
         for sending, data in entry.packets:
             lines.append(f"{'TX' if sending else 'RX'}  {data.hex(' ').upper()}")
         self.detail.setPlainText("\n".join(lines))
+
+    def _open_diagnostics(self):
+        from .diagnostics_dialog import DiagnosticsDialog
+
+        if self._diagnostics is None:
+            names = {device.id: f"{device.name or device.profile.endpoint} · {device.profile.endpoint}"
+                     for device in self._history.workspace.project.devices} if self._managed else {}
+            index = self.log_table.currentIndex()
+            entry = self.journal.items[index.row()] if index.isValid() else None
+            self._diagnostics = DiagnosticsDialog(
+                self, lambda: self._all_entries,
+                lambda row: DiagnosticRow.from_client(row, names.get(row.device_id, "")),
+                selected=entry, device=(self._active_device_id,) if self._active_device_id else None,
+            )
+            self._diagnostics.finished.connect(self._diagnostics_closed)
+        self._diagnostics.show()
+        self._diagnostics.raise_()
+        self._diagnostics.activateWindow()
+
+    def _diagnostics_closed(self):
+        self._diagnostics = None
 
     def _refresh(self):
         state = self._state

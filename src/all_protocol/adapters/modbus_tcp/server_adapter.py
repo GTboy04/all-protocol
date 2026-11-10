@@ -24,7 +24,8 @@ class ModbusServerAdapter:
     def _record(self, request: ServerRequest):
         details = (("unit_id", request.unit_id), ("function", request.function),
                    ("offset", request.offset), ("count", request.count))
-        self._callbacks.request(request.time, RequestMetadata(request.peer, request.result, request.rx, request.tx, details))
+        self._callbacks.request(request.time, RequestMetadata(request.peer, request.result, request.rx, request.tx,
+                                                             details, request.elapsed_ms, request.error))
 
     def _changed(self, change: ValuesChanged):
         self._callbacks.changed(change)
@@ -33,7 +34,7 @@ class ModbusServerAdapter:
                                               change.offset + len(change.values)))
 
     async def bind(self):
-        self._server = TcpServer(self._plan, self._changed, self._record)
+        self._server = TcpServer(self._plan, self._changed, self._record, self._callbacks.fault)
         await self._server.bind()
 
     async def shutdown(self):

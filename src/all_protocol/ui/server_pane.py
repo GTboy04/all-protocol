@@ -4,9 +4,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QWidget,
 )
 
+from ..application.diagnostics import DiagnosticRow
+from ..application.faults import FaultAction, FaultUpdate
 from ..application.server_contracts import ListenerState, ListenerUpdate, RequestMetadata, RuntimeChange, ServerLifecycle
 from ..application.simulation import SimulationUpdate
 from .main_window import Rows, _heading, _panel, _table
+from .diagnostics_dialog import DiagnosticsDialog
+from .fault_dialog import FaultDialog
 from .simulation_dialog import SimulationDialog
 from .widgets import add_field, spinbox
 
@@ -24,6 +28,8 @@ class ServerPane(QWidget):
         self.endpoint = ""
         self.listener_error = ""
         self.simulation_update: SimulationUpdate | None = None
+        self.fault_update = FaultUpdate()
+        self._diagnostics = None
         self._load_error = False
 
     @property
@@ -66,6 +72,14 @@ class ServerPane(QWidget):
         self.scene_status.setObjectName("resultContext")
         scene.addWidget(self.scene_status, 1)
         layout.addLayout(scene)
+        faults = QHBoxLayout()
+        self.fault_button = self._button(faults, "故障注入…", self._open_faults)
+        self.reset_fault = self._button(faults, "重置故障", self._reset_fault)
+        self.fault_status = QLabel()
+        self.fault_status.setWordWrap(True)
+        self.fault_status.setObjectName("resultContext")
+        faults.addWidget(self.fault_status, 1)
+        layout.addLayout(faults)
         self.feedback = QLabel()
         self.feedback.setObjectName("warning")
         self.feedback.setTextFormat(Qt.TextFormat.PlainText)
@@ -80,6 +94,28 @@ class ServerPane(QWidget):
         dialog = SimulationDialog(self)
         dialog.exec()
         dialog.deleteLater()
+
+    def _open_faults(self):
+        dialog = FaultDialog(self)
+        dialog.exec()
+        dialog.deleteLater()
+
+    def _reset_fault(self):
+        self.bridge.submit(self.bridge.session.configure_fault(None))
+
+    def _refresh_fault(self):
+        update = self.fault_update
+        running = self.state == ListenerState.LISTENING
+        self.fault_button.setEnabled(running)
+        self.reset_fault.setEnabled(running and update.rule is not None)
+        if update.rule is None:
+            self.fault_status.setText("故障未启用")
+            return
+        rule = update.rule
+        scope = f"剩余 {update.remaining} 次" if update.remaining is not None else f"限时 {rule.duration_ms} ms"
+        status = scope if update.active else "已结束"
+        action = f"{rule.action} {rule.delay_ms} ms" if rule.action == FaultAction.DELAY else str(rule.action)
+        self.fault_status.setText(f"{action} · {rule.operation} · {status} · 已触发 {update.triggered} 次")
 
     def _refresh_simulation(self):
         update = self.simulation_update
@@ -97,10 +133,14 @@ class ServerPane(QWidget):
     def _journal_panel(self, headers, format_row, numbers=(), monospace=()):
         panel, layout = _panel()
         self.journal_heading = _heading("请求日志")
-        layout.addWidget(self.journal_heading)
+        header = QHBoxLayout()
+        header.addWidget(self.journal_heading)
+        self._button(header, "请求诊断…", self._open_diagnostics)
+        header.addStretch()
+        layout.addLayout(header)
         self.journal_panel = panel
         self.requests = Rows(headers, format_row, numbers, monospace)
-        table = _table(self.requests)
+        table = self.request_table = _table(self.requests)
         table.setAccessibleName("请求日志")
         self.detail = QPlainTextEdit()
         self.detail.setReadOnly(True)
@@ -199,6 +239,7 @@ class ServerPane(QWidget):
             previous, self.state = self.state, payload.state
             if self.state == ListenerState.STOPPED:
                 self.simulation_update = None
+                self.fault_update = FaultUpdate()
             self.endpoint = event.endpoint
             self.listener_error = payload.error
             if payload.error:
@@ -220,6 +261,9 @@ class ServerPane(QWidget):
             self.simulation_update = payload
             self._refresh_simulation()
             self.simulation_changed.emit()
+        elif isinstance(payload, FaultUpdate):
+            self.fault_update = payload
+            self._refresh_fault()
 
     def _show_request(self, index, _previous):
         if index.isValid():
@@ -229,6 +273,20 @@ class ServerPane(QWidget):
             self.detail.setPlainText(f"RX  {rx or '—'}\nTX  {tx or '—'}")
         else:
             self.detail.clear()
+
+    def _open_diagnostics(self):
+        if self._diagnostics is None:
+            index = self.request_table.currentIndex()
+            entry = self.requests.items[index.row()] if index.isValid() else None
+            self._diagnostics = DiagnosticsDialog(self, lambda: self.requests.items, DiagnosticRow.from_server,
+                                                  server=True, selected=entry)
+            self._diagnostics.finished.connect(self._diagnostics_closed)
+        self._diagnostics.show()
+        self._diagnostics.raise_()
+        self._diagnostics.activateWindow()
+
+    def _diagnostics_closed(self):
+        self._diagnostics = None
 
     def _refresh_listener(self):
         idle = self.state == ListenerState.STOPPED
@@ -248,5 +306,6 @@ class ServerPane(QWidget):
         self.dirty.setText("有未保存修改" if self._plan() != self._saved_plan else
                            "方案未加载" if self._load_error else applied)
         self._refresh_simulation()
+        self._refresh_fault()
         self.listener_changed.emit()
         return idle, running

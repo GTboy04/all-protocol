@@ -24,7 +24,8 @@ class S7ServerAdapter:
 
     def _record(self, request: S7ServerRequest):
         details = (("function", request.function), ("target", request.target))
-        self._callbacks.request(request.time, RequestMetadata(request.peer, request.result, request.rx, request.tx, details))
+        self._callbacks.request(request.time, RequestMetadata(request.peer, request.result, request.rx, request.tx,
+                                                             details, request.elapsed_ms, request.error))
 
     def _changed(self, change: S7ValuesChanged):
         self._callbacks.changed(change)
@@ -33,7 +34,7 @@ class S7ServerAdapter:
                                               change.offset + len(change.data), change.mask))
 
     async def bind(self):
-        self._server = S7Server(self._plan, self._changed, self._record)
+        self._server = S7Server(self._plan, self._changed, self._record, self._callbacks.fault)
         await self._server.bind()
 
     async def shutdown(self):

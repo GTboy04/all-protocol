@@ -4,7 +4,8 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Protocol
 
-from .contracts import Value
+from .contracts import ErrorKind, Value
+from .faults import FaultHit, FaultOperation, FaultUpdate
 from .simulation import SimulationPoint, SimulationUpdate, WriteSpan
 
 
@@ -40,6 +41,10 @@ class RequestMetadata:
     rx: bytes = b""
     tx: bytes = b""
     details: tuple[tuple[str, Value | None], ...] = ()
+    elapsed_ms: int | None = None
+    error: ErrorKind | None = None
+    session_id: str = ""
+    request_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +57,7 @@ class ServerEvent:
     protocol: str
     endpoint: str
     time: datetime
-    payload: ListenerUpdate | ServerLifecycle | RequestMetadata | RuntimeChange | SimulationUpdate
+    payload: ListenerUpdate | ServerLifecycle | RequestMetadata | RuntimeChange | SimulationUpdate | FaultUpdate
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +67,7 @@ class ServerCallbacks:
     request: Callable[[datetime, RequestMetadata], None]
     changed: Callable[[object], None]
     written: Callable[[WriteSpan], None] | None = None
+    fault: Callable[[FaultOperation], FaultHit | None] | None = None
 
 
 class ServerAdapter(Protocol):
