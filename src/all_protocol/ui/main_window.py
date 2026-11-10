@@ -13,9 +13,10 @@ from PySide6.QtWidgets import (
 
 from ..application.contracts import (
     BatchResult, ClientError, Command, ConnectionState, DeviceEvent, DeviceRemoved, JournalEntry, OperationRejected, Point, ProtocolRegistration,
-    ReadUpdate, SessionState, TableReadUpdate, Target, Value,
+    ReadUpdate, SessionState, TableReadUpdate, Target, WriteStatus,
 )
-from ..application.diagnostics import DiagnosticRow
+from ..application.diagnostics import DiagnosticRow, verification_summary, write_evidence_lines
+from ..point_tables import PointDefinition
 from ..application.session_manager import SessionManager
 from ..application.sampling import SampleStore
 from ..project import validate_profile
@@ -31,7 +32,8 @@ class ProtocolForm(Protocol):
     def connection_config(self) -> tuple[object, str]: ...
     def target(self) -> Target: ...
     def can_write(self) -> bool: ...
-    def confirm_write(self, parent: QWidget, endpoint: str, target: Target) -> tuple[Value, ...] | None: ...
+    def confirm_write(self, parent: QWidget, endpoint: str, target: Target,
+                      point: PointDefinition | None = None) -> Command | None: ...
 
 
 @runtime_checkable
@@ -137,8 +139,10 @@ def _panel():
 
 
 def _journal_row(entry: JournalEntry) -> tuple[str, ...]:
-    return (entry.time.strftime("%m-%d %H:%M:%S"), entry.operation, entry.target,
-            entry.function or "—", f"{entry.elapsed_ms} ms", entry.outcome)
+    operation = ("独立核对" if entry.verification.independent else "自动回读") if entry.verification else entry.operation
+    outcome = entry.write.status if entry.write is not None and entry.write.status == WriteStatus.REJECTED else entry.outcome
+    return (entry.time.strftime("%m-%d %H:%M:%S"), operation, entry.target,
+            entry.function or "—", f"{entry.elapsed_ms} ms", outcome)
 
 
 class MainWindow(QMainWindow):
@@ -163,6 +167,8 @@ class MainWindow(QMainWindow):
         self._last_reads = {}
         self._quick_values = {}
         self._all_entries = []
+        self._write_context = None
+        self._latest_write = None
         self._diagnostics = None
         self._pending_removals = {}
         self._device_errors = {}
@@ -428,6 +434,23 @@ class MainWindow(QMainWindow):
             connection_layout.addLayout(controls)
         body.addWidget(connection)
 
+        self.write_summary, summary_layout = _panel()
+        summary = QHBoxLayout()
+        evidence = QVBoxLayout()
+        self.write_state = QLabel()
+        self.verification_state = QLabel()
+        for label in (self.write_state, self.verification_state):
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            label.setWordWrap(True)
+            evidence.addWidget(label)
+        summary.addLayout(evidence, 1)
+        self.verify_latest = QPushButton("独立读取核对")
+        self.verify_latest.setToolTip("读取上一次写入的目标并核对原始值")
+        self.verify_latest.clicked.connect(self._verify_latest_write)
+        summary.addWidget(self.verify_latest)
+        summary_layout.addLayout(summary)
+        body.addWidget(self.write_summary)
+
         query, query_layout = _panel()
         query_layout.addWidget(_heading("点位操作"))
         query_layout.addWidget(self.query_forms)
@@ -475,7 +498,14 @@ class MainWindow(QMainWindow):
             journal_layout.addWidget(_heading("请求日志"))
         diagnostics = QPushButton("请求诊断…")
         diagnostics.clicked.connect(self._open_diagnostics)
-        journal_layout.addWidget(diagnostics, alignment=Qt.AlignmentFlag.AlignLeft)
+        journal_actions = QHBoxLayout()
+        journal_actions.addWidget(diagnostics)
+        self.verify_selected = QPushButton("核对所选写入")
+        self.verify_selected.setToolTip("读取所选写入记录的原目标")
+        self.verify_selected.clicked.connect(self._verify_selected_write)
+        journal_actions.addWidget(self.verify_selected)
+        journal_actions.addStretch()
+        journal_layout.addLayout(journal_actions)
         journal_layout.addWidget(self.log_table)
         journal_layout.addWidget(self.detail)
         if self._embedded:
@@ -698,9 +728,9 @@ class MainWindow(QMainWindow):
     def _write(self):
         target = self._form.target()
         state = self._state
-        values = self._form.confirm_write(self, state.endpoint, target)
-        if values is not None and self._same_connection(state):
-            self._execute(Command(target, values))
+        command = self._form.confirm_write(self, state.endpoint, target)
+        if command is not None and self._same_connection(state):
+            self._execute(command)
 
     def _table_device(self):
         try:
@@ -738,13 +768,37 @@ class MainWindow(QMainWindow):
         commands = tuple((point.id, Command(point.target)) for point in table.points)
         self._bridge.submit(self._session.execute_table(table.id, commands))
 
-    def _write_point(self, target):
+    def _write_point(self, point):
         state = self._state
         if state.connection != ConnectionState.ONLINE or not self._registration.writable:
             return
-        values = self._form.confirm_write(self, state.endpoint, target)
-        if values is not None and self._same_connection(state):
-            self._execute(Command(target, values))
+        command = self._form.confirm_write(self, state.endpoint, point.target, point)
+        if command is not None and self._same_connection(state):
+            self._execute(command)
+
+    def _selected_entry(self):
+        index = self.log_table.currentIndex()
+        return self.journal.items[index.row()] if index.isValid() else None
+
+    def _can_verify_write(self, entry):
+        return bool(entry is not None and entry.write is not None and entry.write.target is not None
+                    and entry.write.status in (WriteStatus.ACKNOWLEDGED, WriteStatus.UNKNOWN)
+                    and entry.protocol == self._registration.key and entry.endpoint == self._state.endpoint
+                    and (not self._managed or entry.device_id == self._active_device_id)
+                    and self._state.connection == ConnectionState.ONLINE and not self._closing
+                    and self._state.queued < self._state.queue_capacity)
+
+    def _verify_write(self, entry):
+        if self._can_verify_write(entry):
+            self._state = replace(self._state, busy=True, queued=self._state.queued + 1)
+            self._refresh()
+            self._bridge.submit(self._session.verify_write(entry))
+
+    def _verify_latest_write(self):
+        self._verify_write(self._latest_write)
+
+    def _verify_selected_write(self):
+        self._verify_write(self._selected_entry())
 
     def _execute(self, command: Command, interval_ms: int | None = None):
         self.feedback.clear()
@@ -821,12 +875,14 @@ class MainWindow(QMainWindow):
         return bool(device and entry.protocol == device.profile.protocol and entry.endpoint == device.profile.endpoint)
 
     def _append_journal(self, entry):
+        cleared = False
         if self._history is not None:
             try:
                 if self._history.append_entry(entry):
                     self._all_entries.clear()
                     self.journal.reset()
                     self.detail.clear()
+                    cleared = True
             except OSError:
                 self._history_failure("无法保存本地请求日志")
         self._all_entries.insert(0, entry)
@@ -837,6 +893,11 @@ class MainWindow(QMainWindow):
         if self._managed:
             for old in expired:
                 self.journal.discard_oldest(old)
+        if (entry.write is not None or entry.verification is not None or cleared
+                or any(item is self._latest_write for item in expired)):
+            self._refresh_write_summary(force=True)
+        if entry.verification is not None and self.log_table.currentIndex().isValid():
+            self._show_detail(self.log_table.currentIndex(), None)
 
     def _complete_removal(self, device_id):
         profile = self._pending_removals.pop(device_id, None)
@@ -981,6 +1042,7 @@ class MainWindow(QMainWindow):
         self._refresh()
 
     def _show_detail(self, index, _previous):
+        self.verify_selected.setEnabled(self._can_verify_write(self._selected_entry()))
         if not index.isValid():
             self.detail.clear()
             return
@@ -997,9 +1059,47 @@ class MainWindow(QMainWindow):
                                                    f"会话 {entry.session_id}  代次 {entry.generation}"))))
         if entry.detail:
             lines.append(entry.detail)
+        lines.extend(write_evidence_lines(entry))
+        if entry.write is not None and (checked := self._verification_for(entry)) is not None:
+            lines.append(f"{verification_summary(checked)} · 核对请求 #{checked.request_id}")
         for sending, data in entry.packets:
             lines.append(f"{'TX' if sending else 'RX'}  {data.hex(' ').upper()}")
         self.detail.setPlainText("\n".join(lines))
+
+    def _verification_for(self, entry):
+        return next((item for item in self._all_entries
+                     if item.verification is not None and item.device_id == entry.device_id
+                     and item.verification.write_session_id == entry.session_id
+                     and item.verification.write_request_id == entry.request_id), None)
+
+    def _refresh_write_summary(self, *, force=False):
+        context = (self._active_device_id, self._registration.key, self._state.endpoint)
+        if force or context != self._write_context:
+            self._write_context = context
+            device, protocol, endpoint = context
+            self._latest_write = entry = next((item for item in self.journal.items
+                if item.write is not None and item.protocol == protocol and (not endpoint or item.endpoint == endpoint)
+                and (not self._managed or item.device_id == device)), None)
+            self.write_summary.setVisible(entry is not None)
+            if entry is not None:
+                write = entry.write
+                self.write_state.setText(f"写入 #{entry.request_id} · {entry.target} · {write.status}")
+                self.write_state.setToolTip(entry.endpoint)
+                checked = self._verification_for(entry)
+                if checked is not None:
+                    message = verification_summary(checked)
+                elif write.status == WriteStatus.UNKNOWN:
+                    message = "无法验证 · 可独立读取核对"
+                elif write.status != WriteStatus.ACKNOWLEDGED:
+                    message = "无法验证 · 设备未确认写入"
+                elif write.options is not None and write.options.delay_ms is not None:
+                    message = ("等待自动回读" if entry.session_id == self._state.session_id
+                               and self._state.connection == ConnectionState.ONLINE else "无法验证 · 缺少回读记录")
+                else:
+                    message = "未请求自动回读"
+                self.verification_state.setText(message)
+        self.verify_latest.setEnabled(self._can_verify_write(self._latest_write))
+        self.verify_selected.setEnabled(self._can_verify_write(self._selected_entry()))
 
     def _open_diagnostics(self):
         from .diagnostics_dialog import DiagnosticsDialog
@@ -1049,6 +1149,7 @@ class MainWindow(QMainWindow):
         self.query_forms.setEnabled((offline or idle) and not self._closing)
         self.read_button.setEnabled(idle)
         self.write_button.setEnabled(idle and self._registration.writable and self._form.can_write())
+        self._refresh_write_summary()
         self.interval.setEnabled(idle or (offline and not self._closing))
         self.poll_button.setText("停止轮询" if state.polling else "启动轮询")
         self.poll_button.setEnabled(idle or (online and state.polling and not self._stopping_poll and not self._closing))

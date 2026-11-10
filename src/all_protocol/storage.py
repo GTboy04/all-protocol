@@ -8,14 +8,17 @@ from pathlib import Path
 
 from PySide6.QtCore import QIODevice, QLockFile, QSaveFile
 
-from .adapters.modbus_tcp.model import Area
+from .adapters.modbus_tcp.model import Area, ModbusTarget
 from .adapters.modbus_tcp.server_model import ServerPlan, ServerPoint, Station
 from .adapters.modbus_tcp.values import DataType, RegisterOrder
 from .adapters.s7.model import Area as S7Area, DataType as S7DataType, S7Target
 from .adapters.s7.server_model import S7ServerPlan, S7ServerPoint
-from .application.contracts import ErrorKind, JournalEntry
+from .application.contracts import (
+    ErrorKind, JournalEntry, VerificationOptions, VerificationResult, VerificationStatus, WriteResult, WriteStatus,
+)
 from .application.server_contracts import LifecycleAction, RequestMetadata, ServerEvent, ServerLifecycle
 from .application.simulation import decode_rule
+from .point_tables import decode_target, target_record
 
 
 LOG_LIMIT_BYTES = 5 * 1024 * 1024
@@ -81,7 +84,41 @@ def _load_entry(line: bytes) -> JournalEntry:
     data["time"] = datetime.fromisoformat(data["time"])
     data["error"] = ErrorKind(data["error"]) if data["error"] is not None else None
     data["packets"] = tuple((sending, bytes.fromhex(payload)) for sending, payload in data["packets"])
+    if (write := data.get("write")) is not None:
+        if not isinstance(write, dict):
+            raise ValueError("Invalid write evidence")
+        target = write["target"]
+        options = write["options"]
+        error_code = write["error_code"]
+        if error_code is not None and type(error_code) is not int:
+            raise ValueError("Invalid write error code")
+        data["write"] = WriteResult(
+            WriteStatus(write["status"]), _value_tuple(write["values"]),
+            decode_target(data["protocol"], target, single=False) if target is not None else None,
+            VerificationOptions(**options) if options is not None else None,
+            _value_tuple(write["engineering_values"], (str,)), error_code,
+        )
+    if (verification := data.get("verification")) is not None:
+        if not isinstance(verification, dict):
+            raise ValueError("Invalid verification evidence")
+        expected, observed = (_value_tuple(verification[name]) for name in ("expected", "observed"))
+        request_id = verification["write_request_id"]
+        independent = verification["independent"]
+        mismatches = _value_tuple(verification["mismatches"], (int,))
+        if (type(request_id) is not int or request_id < 1 or type(independent) is not bool
+                or any(not 0 <= index < min(len(expected), len(observed)) for index in mismatches)):
+            raise ValueError("Invalid verification reference")
+        data["verification"] = VerificationResult(
+            VerificationStatus(verification["status"]), _text(verification, "write_session_id"), request_id,
+            expected, observed, mismatches, independent,
+        )
     return JournalEntry(**data)
+
+
+def _value_tuple(values, allowed=(int, bool, float, str)):
+    if not isinstance(values, list) or any(type(value) not in allowed for value in values):
+        raise ValueError("Invalid journal values")
+    return tuple(values)
 
 
 @contextmanager
@@ -182,6 +219,16 @@ class LocalHistory:
         record = asdict(entry)
         record["time"] = entry.time.isoformat()
         record["packets"] = [(sending, packet.hex()) for sending, packet in entry.packets]
+        if entry.write is None:
+            del record["write"]
+        else:
+            target = entry.write.target
+            encoded = target_record(target) if isinstance(target, (ModbusTarget, S7Target)) else None
+            if isinstance(target, ModbusTarget) and target.data_type is None:
+                encoded["data_type"] = None
+            record["write"]["target"] = encoded
+        if entry.verification is None:
+            del record["verification"]
         with self._locked():
             return _append_journal(self.journal_path, record)
 

@@ -109,6 +109,44 @@ def test_table_management_and_project_round_trip(client, monkeypatch, tmp_path):
     assert ProjectFile().open(path) == workspace.project
 
 
+def test_point_write_previews_engineering_value_and_displays_separate_readback(client):
+    app, window, _workspace, writes, _protocol = client
+    pane = window.point_table_pane
+    window.connection_button.click()
+    wait_for(window.read_button.isEnabled)
+    pane.point_table.selectRow(0)
+
+    def submit():
+        dialog = app.activeModalWidget()
+        try:
+            dialog.mode.setCurrentText("工程值")
+            dialog.input.setPlainText("4.25")
+            dialog.accept()
+            assert "不是整数" in dialog.error.text() and not writes
+            dialog.input.setPlainText("4.2")
+            assert "原始值  42" in dialog.preview.toPlainText()
+            assert "工程值  4.2 ℃" in dialog.preview.toPlainText()
+            dialog.auto_verify.setChecked(True)
+            dialog.accept()
+        except Exception:
+            dialog.reject()
+            raise
+
+    QTimer.singleShot(0, submit)
+    pane.actions["写入点位…"].click()
+    wait_for(lambda: "回读不一致" in window.verification_state.text())
+    assert "设备已应答" in window.write_state.text()
+    assert writes == [(pane.point.target, (42,))]
+    verification = window.journal.items[0]
+    window.log_table.setCurrentIndex(window.journal.index(0, 0))
+    assert "预期值 42" in window.detail.toPlainText()
+    assert "回读值 235" in window.detail.toPlainText()
+    assert verification.verification.write_request_id == window.journal.items[1].request_id
+    window.verify_latest.click()
+    wait_for(lambda: "独立读取" in window.verification_state.text())
+    assert len(writes) == 1
+
+
 def test_edit_point_and_bulk_preview_are_atomic(client):
     app, window, workspace, _writes, protocol = client
     pane = window.point_table_pane
@@ -212,7 +250,7 @@ def test_read_table_failure_isolated_raw_write_and_address_change_clears_sample(
         dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Ok).click()
 
     QTimer.singleShot(0, confirm_write)
-    pane.actions["写入原始值…"].click()
+    pane.actions["写入点位…"].click()
     wait_for(lambda: writes and not window._state.busy)
     assert writes == [(pane.table.points[0].target, (42,))]
     previous = pane.table.points[0]
@@ -274,7 +312,7 @@ def test_read_only_region_cannot_offer_write(client):
     wait_for(window.read_button.isEnabled)
     pane.point_table.selectRow(0)
     assert pane.actions["读取整表"].isEnabled()
-    assert not pane.actions["写入原始值…"].isEnabled()
+    assert not pane.actions["写入点位…"].isEnabled()
 
 
 def test_independent_table_polling_accepts_manual_write_and_preserves_selection(client):
@@ -305,7 +343,7 @@ def test_independent_table_polling_accepts_manual_write_and_preserves_selection(
         QTimer.singleShot(250, lambda: dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Ok).click())
 
     QTimer.singleShot(0, confirm)
-    pane.actions["写入原始值…"].click()
+    pane.actions["写入点位…"].click()
     wait_for(lambda: bool(writes))
     assert writes[0] == (second_point.target, (42,))
     wait_for(lambda: pane.samples.samples[second.id, second_point.id].request_id > initial_request)

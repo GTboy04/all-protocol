@@ -2,8 +2,42 @@ from dataclasses import dataclass
 from datetime import datetime
 from math import ceil
 
-from .contracts import ErrorKind, JournalEntry
+from .contracts import ErrorKind, JournalEntry, WriteStatus
 from .server_contracts import RequestMetadata, ServerEvent
+
+
+def verification_summary(entry: JournalEntry) -> str:
+    result = entry.verification
+    source = "独立读取" if result.independent else "自动回读"
+    mismatch = f" · {len(result.mismatches)} 项不同" if result.mismatches else ""
+    detail = f" · {entry.detail}" if entry.detail else ""
+    return f"{result.status} · {source} · {entry.time:%H:%M:%S}{mismatch}{detail}"
+
+
+def _evidence_values(values, limit):
+    shown = values if limit is None else values[:limit]
+    text = ", ".join(map(str, shown))
+    return f"{text} … 共 {len(values)} 项" if len(shown) < len(values) else text
+
+
+def write_evidence_lines(entry: JournalEntry, *, limit=None) -> tuple[str, ...]:
+    if (write := entry.write) is not None:
+        values = _evidence_values(write.values, limit)
+        lines = [f"写入应答 {write.status}", f"原始值 {values}"]
+        if write.engineering_values:
+            lines.append(f"工程值 {_evidence_values(write.engineering_values, limit)}")
+        if write.options is not None and any(type(value) is float for value in write.values):
+            lines.append(f"绝对容差 {write.options.absolute_tolerance:g} · 相对容差 {write.options.relative_tolerance:g}")
+        return tuple(lines)
+    if (result := entry.verification) is not None:
+        lines = [f"原写入会话 {result.write_session_id} / 请求 #{result.write_request_id}",
+                 verification_summary(entry), f"预期值 {_evidence_values(result.expected, limit)}"]
+        if result.observed:
+            lines.append(f"回读值 {_evidence_values(result.observed, limit)}")
+        if result.mismatches:
+            lines.append("不一致项 " + _evidence_values(tuple(index + 1 for index in result.mismatches), limit))
+        return tuple(lines)
+    return ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,8 +72,10 @@ class DiagnosticRow:
         else:
             packets = [("TX" if sending else "RX", sending, data) for sending, data in entry.packets]
         source = device_name or entry.device_id or " ".join(filter(None, (entry.protocol, entry.endpoint)))
+        detail = "\n".join(filter(None, (entry.detail, *write_evidence_lines(entry, limit=8))))
+        outcome = entry.write.status if entry.write is not None and entry.write.status == WriteStatus.REJECTED else entry.outcome
         return cls(entry.time, entry.protocol, device, source or "—", entry.operation, entry.target, entry.function,
-                   entry.outcome, entry.error, entry.elapsed_ms, identity, entry.detail, tuple(packets))
+                   outcome, entry.error, entry.elapsed_ms, identity, detail, tuple(packets))
 
     @classmethod
     def from_server(cls, event: ServerEvent):

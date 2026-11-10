@@ -1,16 +1,13 @@
 from dataclasses import asdict
-import re
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPlainTextEdit, QVBoxLayout, QWidget,
-)
+from PySide6.QtCore import Signal
+from PySide6.QtWidgets import QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
 
 from ..adapters.s7.model import MAX_BYTES, MAX_OFFSET, Area, DataType, S7Config, S7Target
-from ..application.contracts import ClientError, Value
+from ..application.contracts import Command
 from ..storage import ProfileFields
 from .widgets import add_field, spinbox
+from .write_dialog import WriteDialog
 
 
 class S7Form:
@@ -68,9 +65,12 @@ class S7Form:
             query.bit.setValue(target.bit)
         query.count.setValue(target.count)
 
-    def confirm_write(self, parent: QWidget, endpoint: str, target: S7Target) -> tuple[Value, ...] | None:
-        dialog = _WriteDialog(parent, endpoint, target)
-        return dialog.values if dialog.exec() == QDialog.DialogCode.Accepted else None
+    def confirm_write(self, parent: QWidget, endpoint: str, target: S7Target, point=None) -> Command | None:
+        dialog = WriteDialog(parent, endpoint, target, point)
+        try:
+            return dialog.command if dialog.exec() == QDialog.DialogCode.Accepted else None
+        finally:
+            dialog.deleteLater()
 
 
 class _ConnectionForm(QWidget):
@@ -155,52 +155,3 @@ class _QueryForm(QWidget):
         permissions = "可读写" if target.writable else "只读"
         self.permissions.setText(f"{permissions} · {target.label} · 单次最多 {limit} 点")
         self.changed.emit()
-
-
-class _WriteDialog(QDialog):
-    def __init__(self, parent: QWidget, endpoint: str, target: S7Target):
-        super().__init__(parent)
-        self.setWindowTitle("确认写入")
-        self.resize(480, 250)
-        self.target = target
-        self.values = None
-        self.input = QPlainTextEdit()
-        instructions = "输入 0 或 1" if target.data_type == DataType.BOOL else "输入数值，用逗号、空格或换行分隔"
-        self.input.setPlaceholderText(instructions)
-        self.input.setAccessibleName("写入值")
-        self.error = QLabel()
-        self.error.setObjectName("warning")
-        self.error.setWordWrap(True)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
-        write = buttons.button(QDialogButtonBox.StandardButton.Ok)
-        write.setText("确认写入")
-        write.setObjectName("write")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        form = QFormLayout()
-        device = QLabel(endpoint)
-        device.setTextFormat(Qt.TextFormat.PlainText)
-        form.addRow("目标设备", device)
-        form.addRow("点位范围", QLabel(target.label))
-        layout = QVBoxLayout(self)
-        layout.addLayout(form)
-        layout.addWidget(self.input)
-        layout.addWidget(self.error)
-        layout.addWidget(buttons)
-        self.input.setFocus()
-
-    def accept(self):
-        fields = re.split(r"[,，\s]+", self.input.toPlainText().strip())
-        parse = float if self.target.data_type == DataType.REAL else int
-        try:
-            values = tuple(parse(field) for field in fields)
-            self.target.encode(values)
-        except ValueError:
-            self.error.setText("请输入有效的十进制数值")
-            return
-        except ClientError as error:
-            self.error.setText(str(error))
-            return
-        self.values = values
-        super().accept()

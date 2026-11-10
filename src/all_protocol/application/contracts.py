@@ -2,6 +2,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from math import isfinite
 from typing import Protocol
 
 
@@ -39,9 +40,29 @@ type Value = int | bool | float | str
 
 
 @dataclass(frozen=True, slots=True)
+class VerificationOptions:
+    delay_ms: int | None = 0
+    absolute_tolerance: float = 1e-6
+    relative_tolerance: float = 1e-6
+
+    def __post_init__(self):
+        if self.delay_ms is not None and (type(self.delay_ms) is not int or not 0 <= self.delay_ms <= 5000):
+            raise ValueError("回读延迟须在 0–5000 ms 之间")
+        for tolerance in (self.absolute_tolerance, self.relative_tolerance):
+            try:
+                valid = type(tolerance) in (float, int) and isfinite(tolerance) and tolerance >= 0
+            except OverflowError:
+                valid = False
+            if not valid:
+                raise ValueError("浮点容差须为非负有限数值")
+
+
+@dataclass(frozen=True, slots=True)
 class Command:
     target: Target
     values: tuple[Value, ...] | None = None
+    verification: VerificationOptions | None = None
+    engineering_values: tuple[str, ...] = ()
 
     @property
     def operation(self) -> str:
@@ -71,6 +92,40 @@ class SessionState:
     session_id: str = ""
 
 
+class WriteStatus(StrEnum):
+    ACKNOWLEDGED = "设备已应答"
+    REJECTED = "设备已拒绝"
+    UNKNOWN = "写入结果未知"
+    NOT_SENT = "写入未发送"
+
+
+class VerificationStatus(StrEnum):
+    MATCH = "回读一致"
+    MISMATCH = "回读不一致"
+    UNAVAILABLE = "无法验证"
+
+
+@dataclass(frozen=True, slots=True)
+class WriteResult:
+    status: WriteStatus
+    values: tuple[Value, ...]
+    target: Target | None = None
+    options: VerificationOptions | None = None
+    engineering_values: tuple[str, ...] = ()
+    error_code: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VerificationResult:
+    status: VerificationStatus
+    write_session_id: str
+    write_request_id: int
+    expected: tuple[Value, ...]
+    observed: tuple[Value, ...] = ()
+    mismatches: tuple[int, ...] = ()
+    independent: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class JournalEntry:
     request_id: int
@@ -89,6 +144,8 @@ class JournalEntry:
     device_id: str = ""
     session_id: str = ""
     generation: int = 0
+    write: WriteResult | None = None
+    verification: VerificationResult | None = None
 
 
 @dataclass(frozen=True, slots=True)

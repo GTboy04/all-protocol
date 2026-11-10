@@ -205,7 +205,7 @@ class PointTablePane(QWidget):
             self._button(toolbar, label, slot)
         toolbar.addStretch()
         self._button(toolbar, "读取整表", self._read).setObjectName("primary")
-        self._button(toolbar, "写入原始值…", self._write).setObjectName("write")
+        self._button(toolbar, "写入点位…", self._write).setObjectName("write")
         layout.addLayout(toolbar)
         self.rows = Rows(("名称", "地址 / 类型", "原始值", "工程值", "单位", "最后采样", "质量", "最后成功", "说明"), self._row, (2, 3))
         self.rows.setParent(self)
@@ -328,8 +328,8 @@ class PointTablePane(QWidget):
         writable = point is not None and getattr(point.target, "writable", True)
         if point is not None and hasattr(point.target, "area") and target_record(point.target)["area"] in ("IR", "DI"):
             writable = False
-        self.actions["写入原始值…"].setEnabled(idle and writable and self.can_write())
-        for name in ("读取整表", "写入原始值…"):
+        self.actions["写入点位…"].setEnabled(idle and writable and self.can_write())
+        for name in ("读取整表", "写入点位…"):
             self.actions[name].setToolTip("手动任务队列已满，请等待任务完成" if self.state.queued >= self.state.queue_capacity else "")
         self.tables.setEnabled(not getattr(self, "closing", False))
         self.save_device_button.setEnabled(not getattr(self, "closing", False))
@@ -477,8 +477,8 @@ class PointTablePane(QWidget):
             self.read_table(self.table)
 
     def _write(self):
-        if self.point and self.actions["写入原始值…"].isEnabled():
-            self.write_point(self.point.target)
+        if self.point and self.actions["写入点位…"].isEnabled():
+            self.write_point(self.point)
 
     def handle_read(self, event: TableReadUpdate):
         self._dirty.update(self.samples.update(event))

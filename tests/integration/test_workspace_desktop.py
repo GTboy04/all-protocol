@@ -155,6 +155,41 @@ def test_project_diagnostics_highlights_raw_bytes_while_sampling_and_shows_fault
     wait_for(lambda: pane.fault_status.text() == "故障未启用")
 
 
+def test_quick_write_evidence_follows_the_original_project_device(workspace):
+    app, home, _ = workspace
+    window = home.project_window
+    client = window.client
+    window.resize(780, 620)
+    for _, pane in window.servers.panes():
+        pane.listen.click()
+    wait_for(lambda: window.listeners.text() == "监听 2/2")
+    select(window, "device", "mb")
+    client.connect_all_button.click()
+    wait_for(lambda: window.connections.text() == "连接 2/2")
+
+    def confirm():
+        dialog = app.activeModalWidget()
+        dialog.input.setPlainText("123")
+        dialog.auto_verify.setChecked(True)
+        dialog.accept()
+
+    QTimer.singleShot(0, confirm)
+    client.write_button.click()
+    wait_for(lambda: "回读一致" in client.verification_state.text())
+    assert "设备已应答" in client.write_state.text() and client.write_summary.isVisible()
+    write = next(entry for entry in client.journal.items if entry.write is not None)
+    assert write.device_id == "mb"
+    select(window, "device", "s7")
+    assert not client.write_summary.isVisible() and not client.verify_selected.isEnabled()
+    select(window, "device", "mb")
+    assert client.write_summary.isVisible() and "回读一致" in client.verification_state.text()
+    client.log_table.setCurrentIndex(client.journal.index(client.journal.items.index(write), 0))
+    assert client.verify_selected.isEnabled()
+    client.verify_selected.click()
+    wait_for(lambda: "独立读取" in client.verification_state.text())
+    assert sum(entry.write is not None for entry in client.journal.items) == 1
+
+
 def test_two_clients_two_listeners_switch_cancel_close_and_restore_without_running(workspace):
     app, home, path = workspace
     window = home.project_window

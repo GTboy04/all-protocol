@@ -146,6 +146,12 @@ class S7Target:
             raise ClientError(ErrorKind.INPUT, "I 区只读")
         return self.pack_values(values)
 
+    def prepare_write(self, values: tuple[Value, ...]) -> tuple[Value, ...]:
+        payload = self.encode(values)
+        if self.data_type == DataType.REAL:
+            return tuple(value for value, in self.data_type.codec.iter_unpack(payload))
+        return values
+
     def pack_values(self, values: tuple[Value, ...]) -> bytes:
         self.validate()
         if len(values) != self.count:

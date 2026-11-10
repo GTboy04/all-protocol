@@ -38,6 +38,8 @@ class SessionManager:
         if self.devices.get(runtime.id) is not runtime:
             return
         if isinstance(payload, SessionState):
+            if payload.connection == ConnectionState.CONNECTING and payload.session_id:
+                runtime.session_id = payload.session_id
             payload = replace(payload, device_id=runtime.id, session_id=runtime.session_id)
             runtime.state = payload
         elif isinstance(payload, JournalEntry):
@@ -103,11 +105,14 @@ class SessionManager:
         return True
 
     async def call(self, device_id, method, *args):
-        if method not in {"execute", "execute_table", "start_table_polling", "stop_table_polling", "stop_polling", "stop_all_polling"}:
+        if method not in {"execute", "verify_write", "execute_table", "start_table_polling",
+                          "stop_table_polling", "stop_polling", "stop_all_polling"}:
             raise ValueError("不支持的设备操作")
         runtime = self.devices.get(device_id)
         if runtime is None or runtime.retiring or self._closing or self._disconnecting:
             return self._reject(device_id, "设备不可用，请求未发送")
+        if method == "verify_write" and args[0].device_id != device_id:
+            return self._reject(device_id, "核对的写入属于其他设备，请求未发送")
         return await getattr(runtime.session, method)(*args)
 
     async def connect_all(self, specifications):
@@ -175,6 +180,9 @@ class DeviceSession:
 
     async def execute(self, command, interval_ms=None):
         return await self.manager.call(self.device_id, "execute", command, interval_ms)
+
+    async def verify_write(self, entry):
+        return await self.manager.call(self.device_id, "verify_write", entry)
 
     async def execute_table(self, table_id, commands):
         return await self.manager.call(self.device_id, "execute_table", table_id, commands)

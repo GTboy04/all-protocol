@@ -6,7 +6,7 @@ from itertools import count
 from math import floor
 from time import monotonic
 
-from .contracts import Command
+from .contracts import Command, JournalEntry
 
 
 @dataclass(frozen=True)
@@ -14,6 +14,7 @@ class Work:
     command: Command
     table_id: str = ""
     members: tuple[tuple[str, Command], ...] = ()
+    verify_write: JournalEntry | None = None
 
 
 def table_work(table_id, commands):

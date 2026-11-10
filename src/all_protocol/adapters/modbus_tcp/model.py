@@ -95,6 +95,13 @@ class ModbusTarget:
         except ValueError as error:
             raise ClientError(ErrorKind.INPUT, str(error)) from error
 
+    def prepare_write(self, values: tuple[Value, ...]) -> tuple[Value, ...]:
+        self.validate(values)
+        kind = self.value_type
+        if kind.floating:
+            return tuple(kind.decode(kind.encode(value, self.order), self.order) for value in values)
+        return values
+
     def validate(self, values: tuple[Value, ...] | None = None) -> int:
         rule = RULES[self.area]
         if not 1 <= self.unit_id <= 255:

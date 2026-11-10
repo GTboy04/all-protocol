@@ -1,16 +1,12 @@
-import re
-
 from PySide6.QtCore import QSignalBlocker, Signal
-from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel,
-    QLineEdit, QPlainTextEdit, QVBoxLayout, QWidget,
-)
+from PySide6.QtWidgets import QComboBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QVBoxLayout, QWidget
 
 from ..adapters.modbus_tcp.model import RULES, Area, ModbusTarget, ModbusTcpConfig, data_types
 from ..adapters.modbus_tcp.values import DataType, RegisterOrder
-from ..application.contracts import ClientError, Target, Value
+from ..application.contracts import Command, Target
 from ..storage import ProfileFields
 from .widgets import add_field, spinbox
+from .write_dialog import WriteDialog
 
 
 def order_picker(selected=RegisterOrder.BIG):
@@ -79,9 +75,12 @@ class ModbusTcpForm:
         target = self.target()
         return 1 <= target.register_count <= RULES[target.area].write_limit
 
-    def confirm_write(self, parent: QWidget, endpoint: str, target: Target) -> tuple[Value, ...] | None:
-        dialog = _WriteDialog(parent, endpoint, target)
-        return dialog.values if dialog.exec() == QDialog.DialogCode.Accepted else None
+    def confirm_write(self, parent: QWidget, endpoint: str, target: Target, point=None) -> Command | None:
+        dialog = WriteDialog(parent, endpoint, target, point)
+        try:
+            return dialog.command if dialog.exec() == QDialog.DialogCode.Accepted else None
+        finally:
+            dialog.deleteLater()
 
 
 class _ConnectionForm(QWidget):
@@ -175,50 +174,3 @@ class _QueryForm(QWidget):
             )
         self.permissions.setText(f"{operations} · 每点占 {words} 个地址 · 偏移从 0 开始")
         self.changed.emit()
-
-
-class _WriteDialog(QDialog):
-    def __init__(self, parent: QWidget, endpoint: str, target: ModbusTarget):
-        super().__init__(parent)
-        self.setWindowTitle("确认写入")
-        self.resize(480, 250)
-        self.target = target
-        self.values: tuple[Value, ...] | None = None
-        self.input = QPlainTextEdit()
-        self.input.setPlaceholderText("输入十进制值，用逗号、空格或换行分隔")
-        self.input.setAccessibleName("写入值")
-        self.error = QLabel()
-        self.error.setObjectName("warning")
-        self.error.setWordWrap(True)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("确认写入")
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setObjectName("write")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        form = QFormLayout()
-        form.addRow("目标设备", QLabel(endpoint))
-        form.addRow("点位范围", QLabel(target.label))
-        form.addRow("数据类型", QLabel(target.value_type.value))
-        if target.value_type != DataType.BOOL:
-            form.addRow("寄存器顺序", QLabel(target.order.label))
-        form.addRow("值的数量", QLabel(str(target.count)))
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 16)
-        layout.setSpacing(10)
-        layout.addLayout(form)
-        layout.addWidget(self.input)
-        layout.addWidget(self.error)
-        layout.addWidget(buttons)
-        self.input.setFocus()
-
-    def accept(self):
-        fields = re.split(r"[,，\s]+", self.input.toPlainText().strip())
-        try:
-            values = tuple(self.target.value_type.parse(field) for field in fields)
-            self.target.validate(values)
-        except (ClientError, ValueError) as error:
-            self.error.setText(str(error))
-            return
-        self.values = values
-        super().accept()

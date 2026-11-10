@@ -2,7 +2,8 @@
 
 import csv
 from dataclasses import dataclass, replace
-from decimal import Decimal, localcontext
+from decimal import Decimal, InvalidOperation, localcontext
+from fractions import Fraction
 import io
 import json
 import math
@@ -47,7 +48,7 @@ def target_record(target: PointTarget) -> dict:
     raise ValueError("不支持的点位目标")
 
 
-def decode_target(protocol: str, data) -> PointTarget:
+def decode_target(protocol: str, data, *, single=True) -> PointTarget:
     if not isinstance(data, dict):
         raise ValueError("target 必须是对象")
     integers = ("unit_id", "offset", "count") if protocol == "modbus-tcp" else ("db", "offset", "count", "bit")
@@ -55,15 +56,16 @@ def decode_target(protocol: str, data) -> PointTarget:
         raise ValueError("目标地址、数量和位索引必须是整数")
     try:
         if protocol == "modbus-tcp":
+            kind = data["data_type"]
             target = ModbusTarget(data["unit_id"], Area(data["area"]), data["offset"], data["count"],
-                                  DataType(data["data_type"]), RegisterOrder(data["order"]))
+                                  DataType(kind) if kind is not None or single else None, RegisterOrder(data["order"]))
         elif protocol == "s7":
             target = S7Target(S7Area[data["area"]], data["db"], data["offset"], S7DataType(data["data_type"]),
                               data["count"], data["bit"])
         else:
             raise ValueError(f"不支持的协议：{protocol}")
         target.validate()
-        if target.count != 1:
+        if single and target.count != 1:
             raise ValueError("每个命名点位只表示一个值，数量必须为 1")
         return target
     except (KeyError, TypeError, ClientError) as error:
@@ -116,6 +118,31 @@ class PointDefinition:
             context.prec = 80
             result = number * Decimal(str(self.scale)) + Decimal(str(self.offset))
             return f"{result:.{self.precision}f}"
+
+    def raw_from_engineering(self, text: str) -> Value:
+        if len(text) > 1024:
+            raise ValueError("工程值超出可转换范围")
+        try:
+            number = Decimal(text)
+        except InvalidOperation as error:
+            raise ValueError("请输入有效的工程值") from error
+        if not number.is_finite() or abs(number.adjusted()) > 1000:
+            raise ValueError("工程值超出可转换范围")
+        scale = Decimal(str(self.scale))
+        if scale.is_zero():
+            raise ValueError("倍率为 0，无法从工程值反算")
+        # Rational arithmetic keeps the integer test exact, including UInt64.
+        raw = (Fraction(number) - Fraction(Decimal(str(self.offset)))) / Fraction(scale)
+        target = self.target
+        floating = target.value_type.floating if isinstance(target, ModbusTarget) else target.data_type == S7DataType.REAL
+        if floating:
+            try:
+                return float(raw)
+            except OverflowError as error:
+                raise ValueError("工程值反算后超出原始值范围") from error
+        if raw.denominator != 1:
+            raise ValueError("工程值反算后不是整数")
+        return raw.numerator
 
 
 @dataclass(frozen=True)

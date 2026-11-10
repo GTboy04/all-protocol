@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
 from itertools import count
+from math import isclose
 from time import monotonic
 from typing import cast
 from uuid import uuid4
@@ -11,7 +12,7 @@ from uuid import uuid4
 from .contracts import (
     Client, ClientError, ClientEvents, Command, ConnectionState, ErrorKind,
     JournalEntry, OperationRejected, Point, ProtocolRegistration, ReadUpdate, SessionState, TableReadUpdate,
-    WritableClient,
+    VerificationOptions, VerificationResult, VerificationStatus, WritableClient, WriteResult, WriteStatus,
 )
 from .scheduling import RequestScheduler, Work, table_work
 
@@ -36,6 +37,8 @@ class Session:
         self._client: Client | None = None
         self._protocol = ""
         self._task: asyncio.Task | None = None
+        self._verification_task: asyncio.Task | None = None
+        self._verification_reading = False
         self._scheduler = RequestScheduler(clock=clock, capacity=queue_capacity)
         self._wait = wait
         self._wake = asyncio.Event()
@@ -52,12 +55,14 @@ class Session:
         self._emit(self._state)
 
     def _entry(self, request_id, operation, target, start, outcome, *,
-               function="", error=None, detail="", packets=(), operation_id=None, generation=None):
+               function="", error=None, detail="", packets=(), operation_id=None, generation=None,
+               write=None, verification=None):
         entry = JournalEntry(request_id, datetime.now(), operation, target, function,
                              round((monotonic() - start) * 1000), outcome, error, detail, packets,
                              protocol=self._protocol, endpoint=self._state.endpoint, operation_id=operation_id,
                              session_id=self._state.session_id,
-                             generation=self._generation if generation is None else generation)
+                             generation=self._generation if generation is None else generation,
+                             write=write, verification=verification)
         self._emit(entry)
         return entry
 
@@ -180,6 +185,15 @@ class Session:
             self._wake.set()
             raise
 
+    async def verify_write(self, entry: JournalEntry):
+        write = entry.write
+        if (write is None or write.target is None
+                or write.status not in (WriteStatus.ACKNOWLEDGED, WriteStatus.UNKNOWN)
+                or (entry.protocol, entry.endpoint) != (self._protocol, self._state.endpoint)):
+            self._reject("独立核对", "请选择当前连接的已应答或结果未知的写入")
+            return False
+        return await self._submit((Work(Command(write.target), verify_write=entry),))
+
     async def execute_table(self, table_id: str, commands: tuple[tuple[str, Command], ...]):
         """Enqueue one table snapshot, interleaved fairly at request boundaries."""
         if any(command.values is not None for _, command in commands):
@@ -230,6 +244,8 @@ class Session:
     async def _submit(self, items):
         table_id = items[0].table_id if items else ""
         operation_name = items[0].command.operation if items else "读取"
+        if items and items[0].verify_write is not None:
+            operation_name = "独立核对"
         if not self._online():
             self._reject(operation_name, "当前未连接，请求未发送", table_id)
             return False
@@ -247,6 +263,11 @@ class Session:
         except asyncio.CancelledError:
             cancelled = self._scheduler.cancel(operation.id)
             if cancelled is not None:
+                active = self._scheduler.active
+                # An issued read must drain its reply before another request uses this connection.
+                if (active is not None and active.owner is operation
+                        and self._verification_task is not None and not self._verification_reading):
+                    self._verification_task.cancel()
                 self._record_cancelled(cancelled)
             self._waiters.pop(operation.id, None)
             self._sync_schedule()
@@ -255,9 +276,15 @@ class Session:
 
     def _record_cancelled(self, operation):
         for item in operation.items[operation.index:]:
+            if item.verify_write is not None:
+                self._verification_unavailable(item.verify_write, operation.id, True, "排队核对已取消")
+                continue
+            command = item.command
+            write = (WriteResult(WriteStatus.NOT_SENT, command.values, options=command.verification,
+                                 engineering_values=command.engineering_values) if command.values is not None else None)
             self._entry(next(self._ids), item.command.operation, item.command.target.label, monotonic(),
                         "已取消（未发送）", error=ErrorKind.DISCONNECTED, detail="连接断开或任务取消，排队请求未发送",
-                        operation_id=operation.id)
+                        operation_id=operation.id, write=write)
 
     def _sync_schedule(self):
         scheduler = self._scheduler
@@ -292,9 +319,20 @@ class Session:
                 self._sync_schedule()
                 successful = False
                 try:
-                    context = (item.work.table_id, item.work.members) if item.work.table_id else None
-                    successful = await self._request(self._client, item.work.command, read_context=context,
-                                                     operation_id=item.owner.id)
+                    work, operation_id = item.work, item.owner.id
+                    if work.verify_write is not None:
+                        successful = await self._verify(work.verify_write, operation_id, independent=True)
+                    else:
+                        context = (work.table_id, work.members) if work.table_id else None
+                        entry = await self._request(self._client, work.command, read_context=context,
+                                                    operation_id=operation_id)
+                        successful = entry.error is None
+                        if (successful and entry.write is not None and entry.write.options is not None
+                                and entry.write.options.delay_ms is not None):
+                            if self._online() and operation_id in self._scheduler.operations:
+                                await self._verify(entry, operation_id)
+                            else:
+                                self._verification_unavailable(entry, operation_id, False, "连接断开或任务已取消")
                 finally:
                     self._scheduler.complete(item, successful)
                     self._finish_operations()
@@ -302,7 +340,63 @@ class Session:
         finally:
             self._task = None
 
-    async def _request(self, client: Client, command: Command, *, read_context=None, operation_id=None) -> bool:
+    async def _verify(self, write: JournalEntry, operation_id: int, *, independent=False) -> bool:
+        options = write.write.options or VerificationOptions()
+
+        async def read_after_delay():
+            if not independent and options.delay_ms:
+                await asyncio.sleep(options.delay_ms / 1000)
+            if not self._online():
+                self._verification_unavailable(write, operation_id, independent, "回读前连接已断开")
+                return None
+            self._verification_reading = True
+            return await self._request(self._client, Command(write.write.target), operation_id=operation_id,
+                                       verify_write=write, independent=independent)
+
+        self._verification_task = task = asyncio.create_task(read_after_delay())
+        try:
+            entry = await task
+            return entry is not None and entry.verification.status == VerificationStatus.MATCH
+        except asyncio.CancelledError:
+            if not self._verification_reading:
+                self._verification_unavailable(write, operation_id, independent, "回读发送前已取消")
+            if asyncio.current_task().cancelling():
+                raise
+            return False
+        finally:
+            self._verification_task = None
+            self._verification_reading = False
+
+    def _verification_unavailable(self, write, operation_id, independent, reason):
+        result = VerificationResult(VerificationStatus.UNAVAILABLE, write.session_id, write.request_id,
+                                    write.write.values, independent=independent)
+        self._entry(next(self._ids), "回读验证", write.target, monotonic(), result.status, detail=reason,
+                    operation_id=operation_id, verification=result)
+
+    @staticmethod
+    def _compare(write, points, compare, independent):
+        expected = write.write.values
+        observed = tuple(point.value for point in points) if points is not None else ()
+        mismatches = ()
+        status = VerificationStatus.UNAVAILABLE
+        if compare:
+            options = write.write.options or VerificationOptions()
+
+            def equal(wanted, actual):
+                if type(wanted) is float:
+                    return type(actual) in (float, int) and isclose(wanted, actual, rel_tol=options.relative_tolerance,
+                                                                   abs_tol=options.absolute_tolerance)
+                if type(wanted) in (bool, int):
+                    return type(actual) in (bool, int) and wanted == actual
+                return type(wanted) is type(actual) and wanted == actual
+
+            mismatches = tuple(index for index, (wanted, actual) in enumerate(zip(expected, observed, strict=True))
+                               if not equal(wanted, actual))
+            status = VerificationStatus.MISMATCH if mismatches else VerificationStatus.MATCH
+        return VerificationResult(status, write.session_id, write.request_id, expected, observed, mismatches, independent)
+
+    async def _request(self, client: Client, command: Command, *, read_context=None, operation_id=None,
+                       verify_write=None, independent=False) -> JournalEntry:
         start = monotonic()
         generation = self._generation
         request_id = next(self._ids)
@@ -311,36 +405,60 @@ class Session:
         points: tuple[Point, ...] | None = None
         failure = None
         canceled = False
+        values = command.values
         try:
             function = client.function(command)
-            if command.values is None:
+            if values is None:
                 points = await client.read(command.target)
                 if read_context is not None and len(points) != len(read_context[1]):
                     raise ClientError(ErrorKind.RESPONSE, "命名点位响应数量与请求不一致")
+                if verify_write is not None and len(points) != len(verify_write.write.values):
+                    raise ClientError(ErrorKind.RESPONSE, "回读值数量与写入数量不一致")
             elif self._writable:
-                await cast(WritableClient, client).write(command.target, command.values)
+                prepare = getattr(command.target, "prepare_write", None)
+                if prepare is not None:
+                    values = prepare(values)
+                await cast(WritableClient, client).write(command.target, values)
             else:
                 raise ClientError(ErrorKind.INPUT, "当前协议不支持写入")
         except asyncio.CancelledError:
             canceled = True
-            failure = ClientError(ErrorKind.DISCONNECTED, "连接已断开，请求中止")
+            failure = ClientError(ErrorKind.DISCONNECTED, "连接断开或请求已取消")
         except Exception as error:
             failure = self._failure(error)
         finally:
             self._packets = None
-        if failure is None:
+        write = verification = None
+        detail = self._detail(failure) if failure else ""
+        if values is not None:
+            if failure is None:
+                status = WriteStatus.ACKNOWLEDGED
+            elif failure.write_rejected:
+                status = WriteStatus.REJECTED
+            elif failure.kind != ErrorKind.INPUT and any(sending for sending, _ in packets):
+                status = WriteStatus.UNKNOWN
+            else:
+                status = WriteStatus.NOT_SENT
+            target = command.target if status != WriteStatus.NOT_SENT else None
+            write = WriteResult(status, values, target, command.verification, command.engineering_values,
+                                failure.code if failure else None)
+        if verify_write is not None:
+            discarded = operation_id not in self._scheduler.operations
+            verification = self._compare(verify_write, points, failure is None and not discarded, independent)
+            outcome = verification.status
+            if discarded and not detail:
+                detail = "核对已取消"
+        elif failure is None:
             outcome = "设备已应答" if points is None else f"成功 · {len(points)} 点"
-        elif command.values is not None and any(sending for sending, _ in packets) and (
-            failure.kind != ErrorKind.INPUT and not failure.write_rejected
-        ):
-            outcome = "写入结果未知"
+        elif write is not None and write.status == WriteStatus.UNKNOWN:
+            outcome = write.status
         else:
             outcome = failure.kind
         entry = self._entry(request_id, command.operation, command.target.label, start, outcome,
                             function=function, error=failure.kind if failure else None,
-                            detail=self._detail(failure) if failure else "", packets=tuple(packets), operation_id=operation_id,
-                            generation=generation)
-        if command.values is None:
+                            detail=detail, packets=tuple(packets), operation_id=operation_id,
+                            generation=generation, write=write, verification=verification)
+        if command.values is None and verify_write is None:
             if read_context is None:
                 self._emit(ReadUpdate(command, entry, points if failure is None else None, generation))
             else:
@@ -350,7 +468,7 @@ class Session:
                     self._emit(TableReadUpdate(table_id, point_id, ReadUpdate(member, entry, values, generation)))
         if canceled:
             raise asyncio.CancelledError
-        return failure is None
+        return entry
 
     @staticmethod
     def _failure(error: Exception) -> ClientError:
