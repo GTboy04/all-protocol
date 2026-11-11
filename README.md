@@ -7,7 +7,7 @@
 
 面向 PLC 和工业设备联调的 Windows 桌面工具。通过同一个工作区连接真实设备、启动模拟服务、监视点位并查看原始报文。支持 **Modbus TCP** 和 **Siemens S7（经典 S7comm / ISO-on-TCP）**，两个协议均可作为客户端和服务端运行。
 
-[快速开始](#快速开始) · [本机联调](#本机联调) · [使用指南](docs/user-guide.md) · [参与贡献](#参与贡献) · [Star 趋势](#star-趋势)
+[界面与位查看](#界面与位查看) · [快速开始](#快速开始) · [本机联调](#本机联调) · [使用指南](docs/user-guide.md) · [参与贡献](#参与贡献) · [Star 趋势](#star-趋势)
 
 ![AllProtocol 项目工作区，显示 Modbus TCP 模拟点位、运行中的场景及请求报文](docs/assets/workspace.png)
 
@@ -20,6 +20,18 @@
 | 多设备与点表 | 独立连接和轮询多台设备，使用命名点表查看原始值、工程值和采样质量，支持 JSON 和 CSV 导入 |
 | 服务端场景 | 两个协议可同时监听。点位支持固定值、递增、心跳、斜坡、正弦和时间轴，可暂停、重置或手动接管 |
 | 项目与报文 | 保存设备、点表和服务端方案到可移植的项目文件，联调时查看请求结果及 TX / RX 十六进制报文 |
+| 二进制与位查看 | 查看 Bool 及 8、16、32、64 位数值的位模式，支持负数补码和 IEEE 754 浮点数；逐位查看为只读操作 |
+| Windows 界面 | 跟随系统浅色、深色主题，支持键盘快捷键；受支持的 Windows 11 环境启用 Acrylic 背景，高对比度模式回退原生配色 |
+
+## 界面与位查看
+
+从首页进入本地客户端、服务端或项目工作区。窗口保留系统标题栏，主题跟随系统设置；不支持 Acrylic 的环境使用普通背景。
+
+![AllProtocol 首页：项目操作、本地客户端和服务端入口](docs/assets/glass-home.png)
+
+在读取结果、项目点表或服务端点位中选择一行，点击「位查看…」，查看每个 bit 的值、掩码和浮点字段。窗口随所选点位和数值更新，并显示断开、过期等采样状态。这里展示解码后数值的位模式，bit 0 为最低位，协议字节顺序仍以 TX / RX 报文为准；位查看不会写入设备。
+
+![只读位查看窗口：二进制值、逐位状态及掩码](docs/assets/glass-bits-light.png)
 
 ## 快速开始
 
@@ -46,6 +58,7 @@ uv run --locked python -m all_protocol
 ## 文档
 
 - [使用指南](docs/user-guide.md)涵盖源码运行、Windows 打包、项目文件、客户端与服务端配置。
+- [Windows UI 设计](docs/windows-ui-design.md)记录界面改造依据、开源参考、主题与键盘交互及预览。
 - [开发路线](docs/requirements/README.md)记录功能状态和验收范围。
 - [协议扩展开发路线](docs/requirements/protocol-expansion.md)记录 Modbus RTU、OPC UA 及后续候选协议的实施与验收计划。
 - [Modbus TCP 服务端设计](docs/modbus-tcp-server-design.md)、[Siemens S7 客户端设计](docs/s7-client-design.md)和[场景模拟](docs/requirements/R7-simulation.md)提供协议和运行细节。
@@ -58,6 +71,12 @@ uv run --locked python -m all_protocol
 
 ```powershell
 uv run --locked pytest -q
+```
+
+Windows 桌面测试若因跨测试窗口回收导致 Qt 原生进程退出，可按测试文件分别运行。弹窗文字更新与清空的回归检查可单独执行：
+
+```powershell
+uv run --locked pytest tests/integration/test_dialog_repainting.py -q
 ```
 
 ## Star 趋势
