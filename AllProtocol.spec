@@ -7,7 +7,8 @@ icon = assets / "app-icon.ico"
 a = Analysis(
     ["src/all_protocol/__main__.py"],
     datas=[(str(assets / name), "all_protocol/assets")
-           for name in ("app-icon.ico", "chevron-up.svg", "chevron-down.svg")],
+           for name in ("app-icon.ico", "chevron-up.svg", "chevron-down.svg",
+                        "chevron-up-light.svg", "chevron-down-light.svg")],
 )
 
 # Qt on Windows links to the OS ICU ABI. PATH can expose a same-named ICU

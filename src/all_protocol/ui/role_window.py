@@ -4,7 +4,7 @@ from dataclasses import replace
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel, QMessageBox,
-    QPushButton, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from ..application.contracts import ClientError
@@ -23,7 +23,8 @@ class RoleWindow(QWidget):
         super().__init__()
         self.setWindowTitle("工业协议调试台")
         self.setObjectName("workspace")
-        self.resize(800, 400)
+        self.resize(900, 660)
+        self.setMinimumSize(640, 480)
         self._protocols = protocols
         self._server_protocols = tuple(server_protocols)
         if len({item.registration.key for item in self._server_protocols}) != len(self._server_protocols):
@@ -36,23 +37,39 @@ class RoleWindow(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         masthead = QFrame()
         masthead.setObjectName("masthead")
         header = QHBoxLayout(masthead)
-        header.setContentsMargins(18, 12, 18, 12)
+        header.setContentsMargins(24, 16, 24, 16)
+        mark = QLabel()
+        mark.setFixedSize(32, 32)
+        mark.setPixmap(self.windowIcon().pixmap(32, 32))
+        header.addWidget(mark)
         title = QLabel("工业协议调试台")
         title.setObjectName("title")
-        header.addWidget(title)
+        header.addWidget(title, 1)
         layout.addWidget(masthead)
 
-        body = QVBoxLayout()
-        body.setContentsMargins(24, 20, 24, 24)
-        body.setSpacing(14)
+        content = QWidget(objectName="workspace")
+        body = QVBoxLayout(content)
+        body.setContentsMargins(24, 24, 24, 24)
+        body.setSpacing(16)
+        body.addWidget(QLabel("开始调试", objectName="pageTitle"))
+        introduction = QLabel("在项目中管理设备与点表，或直接开始本地调试。", objectName="resultContext")
+        introduction.setWordWrap(True)
+        body.addWidget(introduction)
+        project_panel, project_layout = _panel()
+        project_layout.addWidget(_heading("项目"))
         self.project_status = QLabel()
         self.project_status.setTextFormat(Qt.TextFormat.PlainText)
         self.project_status.setWordWrap(True)
-        body.addWidget(self.project_status)
+        self.project_status.setObjectName("resultContext")
+        project_layout.addWidget(self.project_status)
         project_actions = QHBoxLayout()
+        project_actions.setSpacing(8)
+        secondary_actions = QHBoxLayout()
+        secondary_actions.setSpacing(8)
         self.project_buttons = {}
         for text, action in (("新建项目", self._new_project), ("打开项目…", self._open_project),
                              ("保存项目", self._save_project), ("另存为…", self._save_project_as),
@@ -60,18 +77,27 @@ class RoleWindow(QWidget):
             button = QPushButton(text)
             button.clicked.connect(action)
             self.project_buttons[text] = button
-            project_actions.addWidget(button)
-        body.addLayout(project_actions)
+            (project_actions if text in ("新建项目", "打开项目…", "从本地配置新建…") else secondary_actions).addWidget(button)
+        for name, shortcut in (("新建项目", "Ctrl+N"), ("打开项目…", "Ctrl+O"),
+                               ("保存项目", "Ctrl+S"), ("另存为…", "Ctrl+Shift+S")):
+            self.project_buttons[name].setShortcut(shortcut)
+            self.project_buttons[name].setToolTip(f"{name} ({shortcut})")
+        self.project_buttons["新建项目"].setObjectName("primary")
+        project_actions.addStretch()
+        secondary_actions.addStretch()
+        project_layout.addLayout(project_actions)
+        project_layout.addLayout(secondary_actions)
         self.project_entry = QPushButton("进入项目工作区")
         self.project_entry.setObjectName("primary")
         self.project_entry.clicked.connect(self._open_workspace)
-        body.addWidget(self.project_entry)
-        self._mode_heading = _heading("选择调试模式")
+        project_layout.addWidget(self.project_entry, alignment=Qt.AlignmentFlag.AlignLeft)
+        body.addWidget(project_panel)
+        self._mode_heading = _heading("本地调试")
         body.addWidget(self._mode_heading)
         self._local_cards = QWidget()
         cards = QHBoxLayout(self._local_cards)
         cards.setContentsMargins(0, 0, 0, 0)
-        cards.setSpacing(14)
+        cards.setSpacing(16)
         cards.addWidget(self._card("客户端", "本机  ──请求──→  设备", "连接设备，读取或写入点位。",
                                    self._open_client), 1)
         server_labels = "、".join(item.registration.label for item in self._server_protocols)
@@ -79,20 +105,27 @@ class RoleWindow(QWidget):
                                    self._open_server), 1)
         body.addWidget(self._local_cards, 1)
         body.addStretch()
-        layout.addLayout(body, 1)
+        scroll = QScrollArea()
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
         self._refresh_project()
 
     def _card(self, role, direction, description, action):
         card, layout = _panel()
-        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
         layout.addWidget(_heading(role))
         arrow = QLabel(direction)
         arrow.setObjectName("permissions")
+        arrow.setWordWrap(True)
         layout.addWidget(arrow)
-        layout.addWidget(QLabel(description))
+        detail = QLabel(description)
+        detail.setWordWrap(True)
+        layout.addWidget(detail)
         layout.addStretch()
         button = QPushButton(f"进入{role}")
-        button.setObjectName("primary")
         button.clicked.connect(action)
         layout.addWidget(button)
         return card

@@ -4,12 +4,12 @@ from functools import partial
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QTabWidget, QVBoxLayout, QWidget
 
 from ..application.server_contracts import ListenerState, ServerRegistration
 from ..application.server_session import ServerSession
 from .io_bridge import IoBridge
+from .style import status_color
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +38,9 @@ class ServerWorkbench(QMainWindow):
         self._bridges = []
         self._protocols = []
         self._build(return_home)
+        theme = getattr(QApplication.instance(), "windows_theme", None)
+        if theme is not None:
+            theme.changed.connect(self._refresh_overview)
         try:
             for protocol, storage in protocols_and_storages:
                 self._add(protocol, storage)
@@ -101,8 +104,8 @@ class ServerWorkbench(QMainWindow):
             endpoint = pane.endpoint if active else pane.configured_endpoint
             self.tabs.setTabText(index, f"{name}   {pane.state}" + (f" {endpoint}" if active else ""))
             self.tabs.setTabToolTip(index, f"{name}   {endpoint}   {pane.state}")
-            color = "#154c47" if active else "#896b3d" if pane.state != ListenerState.STOPPED else "#405970"
-            self.tabs.tabBar().setTabTextColor(index, QColor(color))
+            tone = "success" if active else "warning" if pane.state != ListenerState.STOPPED else "secondary"
+            self.tabs.tabBar().setTabTextColor(index, status_color(self.tabs, tone))
         self.overview.setText(f"{listening} / {len(self._protocols)} 项监听中")
         tone = "online" if listening else "offline"
         if self.overview.property("tone") != tone:

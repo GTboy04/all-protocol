@@ -100,6 +100,37 @@ def select(window, kind, key):
     window.tree.setCurrentItem(window._items[kind, key])
 
 
+def test_read_only_bits_use_typed_server_values_and_sample_quality(workspace):
+    from all_protocol.application.sampling import Sample, Quality
+
+    app, home, _ = workspace
+    window = home.project_window
+    select(window, "server", "modbus-tcp")
+    modbus = window._panes["modbus-tcp"][2]
+    modbus.point_table.selectRow(0)
+    reading = modbus._bit_reading()
+    assert reading.pattern.width == 16 and reading.pattern.value == 42
+    assert "初始值" in reading.context
+    modbus.bit_button.click()
+    assert modbus._bit_inspector.cells[-1].text() == "bit 0\n0"
+    modbus._bit_inspector.close()
+
+    select(window, "server", "s7")
+    s7 = window._panes["s7"][2]
+    s7.point_table.selectRow(0)
+    assert s7._bit_reading().pattern.value == 125
+
+    select(window, "table", "mb-table")
+    pane = window.client.point_table_pane
+    pane.point_table.selectRow(0)
+    assert pane._bit_reading().pattern is None
+    pane.samples.samples["mb-table", "mb-point"] = Sample("mb-point", 0x8001, quality=Quality.DISCONNECTED)
+    reading = pane._bit_reading()
+    assert reading.pattern.binary == "1000 0000 0000 0001"
+    assert "断开" in reading.context
+    assert pane.rows.data(pane.rows.index(0, 9), Qt.ItemDataRole.DisplayRole) == reading.pattern.binary
+
+
 def test_project_diagnostics_highlights_raw_bytes_while_sampling_and_shows_fault_status(workspace):
     app, home, _ = workspace
     window = home.project_window
@@ -227,6 +258,8 @@ def test_stopping_s7_listener_disconnects_idle_client_and_allows_reconnect(works
     panes["s7"].listen.click()
     wait_for(lambda: window.listeners.text() == "监听 1/2")
     wait_for(lambda: window.connections.text() == "连接 1/2")
+    # The online count drops during CLOSING, before socket cleanup completes.
+    wait_for(lambda: client.workspace_device_status("s7")[0] == ConnectionState.OFFLINE)
     assert client.workspace_device_status("mb")[0] == ConnectionState.ONLINE
     assert client.workspace_device_status("s7")[0] == ConnectionState.OFFLINE
 

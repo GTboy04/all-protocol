@@ -13,7 +13,7 @@ from all_protocol.ui.main_window import DesktopProtocol
 from all_protocol.ui.modbus_tcp_form import ModbusTcpForm
 from all_protocol.ui.role_window import RoleWindow
 from all_protocol.ui.s7_form import S7Form
-from all_protocol.ui.style import STYLE
+from all_protocol.ui.style import apply_windows_theme
 
 
 def main() -> int:
@@ -22,8 +22,7 @@ def main() -> int:
     icon = files("all_protocol").joinpath("assets", "app-icon.ico")
     with as_file(icon) as icon_path:
         app.setWindowIcon(QIcon(str(icon_path)))
-    app.setStyle("Fusion")
-    app.setStyleSheet(STYLE)
+    apply_windows_theme(app)
     protocols = (
         DesktopProtocol(ProtocolRegistration("modbus-tcp", "Modbus TCP", ModbusTcpClient, True), ModbusTcpForm),
         DesktopProtocol(ProtocolRegistration("s7", "Siemens S7（ISO-on-TCP）", S7Client, True), S7Form),

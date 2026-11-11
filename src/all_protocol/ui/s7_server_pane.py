@@ -9,6 +9,8 @@ from ..application.server_contracts import ListenerState, RequestMetadata, Serve
 from .main_window import Rows, _heading, _panel, _table
 from .server_pane import ServerPane
 from .widgets import EditDialog, spinbox
+from ..application.binary import bit_pattern
+from .bit_inspector import BitReading, show_bit_inspector
 
 
 AREAS = ((Area.DB, "DB 数据块"), (Area.M, "M 标志"), (Area.I, "I 输入"), (Area.Q, "Q 输出"))
@@ -72,6 +74,7 @@ class S7ServerPane(ServerPane):
         self.edit_point = self._button(actions, "编辑", lambda: self._edit_point(self._point))
         self.remove_point = self._button(actions, "删除", self._delete_point)
         actions.addStretch()
+        self.bit_button = self._button(actions, "位查看…", lambda: show_bit_inspector(self, self._bit_reading))
         self.edit_value = self._button(actions, "修改当前值", self._edit_current)
         self.plan_controls = (self.save, self.add_point, self.edit_point, self.remove_point)
         layout.addLayout(actions)
@@ -118,6 +121,16 @@ class S7ServerPane(ServerPane):
         target = point.target
         current = self._memory.current(point) if self._memory is not None else None
         return (target.address(), point.name or "—", target.data_type, _value_text(point.initial), _value_text(current))
+
+    def _bit_reading(self):
+        point = self._point
+        if point is None:
+            return None
+        running = self.state in (ListenerState.LISTENING, ListenerState.STOPPING)
+        value = self._memory.current(point) if running and self._memory is not None else point.initial
+        label = f"{point.target.address()} · {point.name}"
+        return BitReading(label, bit_pattern(value, str(point.target.data_type)),
+                          f"{'当前值' if running else '配置初始值（服务已停止）'}：{value}")
 
     def _edit_point(self, original):
         default_area = Area(self.area_filter.currentData() or Area.DB)

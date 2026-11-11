@@ -87,6 +87,7 @@ class _ConnectionForm(QWidget):
     def __init__(self):
         super().__init__()
         self.host = QLineEdit()
+        self.host.setMinimumWidth(160)
         self.host.setPlaceholderText("例如 127.0.0.1")
         self.port = spinbox(1, 65535, 502)
         self.timeout = spinbox(100, 30000, 3000)

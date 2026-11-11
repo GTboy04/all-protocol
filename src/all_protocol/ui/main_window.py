@@ -17,6 +17,7 @@ from ..application.contracts import (
     ReadUpdate, SessionState, TableReadUpdate, Target, WriteStatus,
 )
 from ..application.diagnostics import DiagnosticRow, verification_summary, write_evidence_lines
+from ..application.binary import binary_text, bit_pattern, target_kind
 from ..application.journal import LogRetention, RetainedLog
 from ..point_tables import PointDefinition
 from ..application.session_manager import SessionManager
@@ -25,6 +26,7 @@ from ..project import validate_profile
 from ..storage import ConnectionProfile, LocalHistory, ProfileFields, VISIBLE_LOG_ROWS
 from .io_bridge import IoBridge
 from .widgets import add_field
+from .bit_inspector import BitReading, show_bit_inspector
 
 
 class ProtocolForm(Protocol):
@@ -113,7 +115,7 @@ def _table(model: Rows) -> QTableView:
     table = QTableView()
     table.setModel(model)
     table.verticalHeader().hide()
-    table.verticalHeader().setDefaultSectionSize(27)
+    table.verticalHeader().setDefaultSectionSize(32)
     table.setShowGrid(False)
     table.setWordWrap(False)
     table.setAlternatingRowColors(True)
@@ -135,8 +137,8 @@ def _panel():
     widget = QFrame()
     widget.setObjectName("panel")
     layout = QVBoxLayout(widget)
-    layout.setContentsMargins(14, 8, 14, 10)
-    layout.setSpacing(7)
+    layout.setContentsMargins(16, 12, 16, 12)
+    layout.setSpacing(8)
     return widget, layout
 
 
@@ -240,9 +242,8 @@ class MainWindow(QMainWindow):
         self.detail.setPlaceholderText("选择一条日志查看详情和 TX/RX 字节")
 
         self.results = Rows[Point](
-            ("地址", "点位", "值", "十六进制"),
-            lambda point: (point.address, point.label, str(point.value), point.hex_value),
-            (2, 3),
+            ("地址", "点位", "值", "十六进制", "二进制"), self._result_row,
+            (2, 3), (3, 4),
         )
         self.journal = Rows[JournalEntry](
             ("时间", "操作", "目标", "功能码", "耗时", "结果"), _journal_row, (4,),
@@ -366,8 +367,8 @@ class MainWindow(QMainWindow):
         masthead = QFrame(root)
         masthead.setObjectName("masthead")
         header = QHBoxLayout(masthead)
-        header.setContentsMargins(18, 9, 18, 9)
-        header.setSpacing(10)
+        header.setContentsMargins(16, 12, 16, 12)
+        header.setSpacing(8)
         if self._return_home is not None:
             home = QPushButton("返回首页")
             home.clicked.connect(self._return_home)
@@ -408,7 +409,7 @@ class MainWindow(QMainWindow):
             connection_header.addWidget(self.delete_recent_button)
         connection_layout.addLayout(connection_header)
         settings = QHBoxLayout()
-        settings.setSpacing(10)
+        settings.setSpacing(8)
         add_field(settings, "协议", self.protocol)
         settings.addWidget(self.connection_forms, 1)
         if not self._embedded:
@@ -475,6 +476,10 @@ class MainWindow(QMainWindow):
         result_title = QHBoxLayout()
         result_title.addWidget(_heading("读取结果"), 1)
         result_title.addWidget(self.result_context)
+        self.bit_button = QPushButton("位查看…")
+        self.bit_button.setToolTip("选择读取结果，查看每个 bit 的 0/1 状态")
+        self.bit_button.clicked.connect(lambda: show_bit_inspector(self, self._bit_reading))
+        result_title.addWidget(self.bit_button)
         result_layout.addLayout(result_title)
         result_layout.addWidget(self.result_table)
         quick = QWidget()
@@ -522,6 +527,24 @@ class MainWindow(QMainWindow):
             split.setSizes([350, 260])
             body.addWidget(split, 1)
         self.setCentralWidget(root)
+
+    def _result_row(self, point):
+        kind = target_kind(self._last_read.command.target) if self._last_read else ""
+        return point.address, point.label, str(point.value), point.hex_value, binary_text(point.value, kind)
+
+    def _bit_reading(self):
+        index = self.result_table.currentIndex()
+        if not index.isValid() or index.row() >= len(self.results.items):
+            return None
+        point = self.results.items[index.row()]
+        update = self._last_read
+        kind = target_kind(update.command.target) if update else ""
+        context = f"解码值：{point.value}；连接：{self._state.connection}"
+        if update:
+            context += f"；采样：{update.entry.time:%H:%M:%S}"
+            if update.points is None:
+                context += "；保留的上次成功结果"
+        return BitReading(point.label, bit_pattern(point.value, kind), context)
 
     def _history_failure(self, message: str):
         logging.warning(message, exc_info=True)

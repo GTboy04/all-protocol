@@ -14,6 +14,8 @@ from .main_window import Rows, _heading, _panel, _table
 from .modbus_tcp_form import order_picker
 from .server_pane import ServerPane
 from .widgets import EditDialog, spinbox
+from ..application.binary import bit_pattern
+from .bit_inspector import BitReading, show_bit_inspector
 
 
 def _display(value):
@@ -95,6 +97,7 @@ class ModbusServerPane(ServerPane):
         self.edit_point = self._button(point_actions, "编辑", lambda: self._edit_point("edit"))
         self.remove_point = self._button(point_actions, "删除", self._delete_point)
         point_actions.addStretch()
+        self.bit_button = self._button(point_actions, "位查看…", lambda: show_bit_inspector(self, self._bit_reading))
         self.edit_value = self._button(point_actions, "修改当前值", self._edit_current)
         self.plan_controls = (self.save, self.add_station, self.edit_station, self.remove_station,
                               self.add_point, self.batch_points, self.edit_point, self.remove_point)
@@ -184,6 +187,16 @@ class ModbusServerPane(ServerPane):
         words = tuple(self._current.get((unit, point.area, address), word)
                       for address, word in zip(point.addresses, defaults, strict=True))
         return point.decode(words)
+
+    def _bit_reading(self):
+        point = self._point
+        if point is None:
+            return None
+        running = self.state in (ListenerState.LISTENING, ListenerState.STOPPING)
+        value = self._current_value(point) if running else point.initial
+        label = f"Unit {self._station.unit_id} · {point.area}[{point.offset}] · {point.name}"
+        return BitReading(label, bit_pattern(value, str(point.value_type)),
+                          f"{'当前值' if running else '配置初始值（服务已停止）'}：{value}")
 
     def _edit_station(self, adding):
         original = None if adding else self._station

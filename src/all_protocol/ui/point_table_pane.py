@@ -9,6 +9,8 @@ from PySide6.QtWidgets import (
 
 from ..application.contracts import ClientError, ConnectionState, SessionState, TableReadUpdate
 from ..application.sampling import Quality, SampleStore
+from ..application.binary import binary_text, bit_pattern, target_kind
+from .bit_inspector import BitReading, show_bit_inspector
 from ..point_tables import (
     IMPORT_LIMIT_BYTES, PointDefinition, PointTable, export_points_csv, export_table_json,
     import_points_csv, import_table_json, new_id, target_record,
@@ -207,7 +209,7 @@ class PointTablePane(QWidget):
         self._button(toolbar, "读取整表", self._read).setObjectName("primary")
         self._button(toolbar, "写入点位…", self._write).setObjectName("write")
         layout.addLayout(toolbar)
-        self.rows = Rows(("名称", "地址 / 类型", "原始值", "工程值", "单位", "最后采样", "质量", "最后成功", "说明"), self._row, (2, 3))
+        self.rows = Rows(("名称", "地址 / 类型", "原始值", "工程值", "单位", "最后采样", "质量", "最后成功", "说明", "二进制"), self._row, (2, 3), (9,))
         self.rows.setParent(self)
         self.point_table = _table(self.rows)
         self.point_table.setAccessibleName("命名点位")
@@ -224,6 +226,9 @@ class PointTablePane(QWidget):
         hint = QLabel("工程值 = 原始值 × 倍率 + 偏置；可按表独立轮询，写入使用原始值。")
         hint.setWordWrap(True)
         footer.addWidget(hint, 1)
+        self.bit_button = QPushButton("位查看…")
+        self.bit_button.clicked.connect(lambda: show_bit_inspector(self, self._bit_reading))
+        footer.addWidget(self.bit_button)
         self.save_device_button = QPushButton("保存设备配置")
         self.save_device_button.clicked.connect(self.save_device)
         footer.addWidget(self.save_device_button)
@@ -273,7 +278,21 @@ class PointTablePane(QWidget):
                     outcome += " · 旧数据"
         if table and (table.id, point.id) in self._pending:
             outcome = "等待读取"
-        return point.name, point.target.label, raw, engineering, point.unit, time, outcome, success, point.description
+        bits = binary_text(sample.raw_value, target_kind(point.target)) if sample else "—"
+        return point.name, point.target.label, raw, engineering, point.unit, time, outcome, success, point.description, bits
+
+    def _bit_reading(self):
+        point, table = self.point, self.table
+        if point is None or table is None:
+            return None
+        sample = self.samples.samples.get((table.id, point.id))
+        pattern = bit_pattern(sample.raw_value, target_kind(point.target)) if sample else None
+        context = f"{point.target.label}；质量：{sample.quality.value if sample else Quality.NEVER.value}"
+        if sample and sample.raw_value is not None:
+            context += f"；原始值：{sample.raw_value}"
+            if sample.last_success_at:
+                context += f"；最后成功：{sample.last_success_at:%H:%M:%S}"
+        return BitReading(point.name, pattern, context)
 
     def refresh(self, state, closing=False):
         self.state, self.closing = state, closing

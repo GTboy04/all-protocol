@@ -9,7 +9,11 @@ class EditDialog(QDialog):
         self.setMinimumWidth(350)
         self.commit = commit
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(16)
         self.form = QFormLayout()
+        self.form.setSpacing(12)
+        self.form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(self.form)
         self.error = QLabel()
         self.error.setObjectName("warning")
@@ -37,6 +41,10 @@ def spinbox(minimum, maximum, value):
     box.setRange(minimum, maximum)
     box.setValue(value)
     box.setKeyboardTracking(False)
+    # Native spin-box hints include oversized step controls. Reserve enough for
+    # the value, a unit suffix and our small arrows without crowding host fields.
+    digits = max(box.fontMetrics().horizontalAdvance(str(bound)) for bound in (minimum, maximum))
+    box.setMaximumWidth(max(96, digits + 80))
     return box
 
 

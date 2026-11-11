@@ -2,9 +2,8 @@ from dataclasses import replace
 from datetime import datetime
 
 from PySide6.QtCore import QSignalBlocker, Qt, QTimer
-from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton, QScrollArea, QSizePolicy,
+    QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton, QScrollArea, QSizePolicy,
     QSplitter, QStackedWidget, QTabBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -13,6 +12,7 @@ from ..application.server_contracts import ListenerState
 from ..project import WorkspaceLayout
 from ..reporting import ReportSnapshot
 from .report_dialog import ReportDialog
+from .style import status_color
 
 
 class _ContextLabel(QLabel):
@@ -52,6 +52,9 @@ class ProjectWindow(QMainWindow):
         self.setWindowTitle(f"{workspace.project.name} · 项目工作区")
         self.resize(1280, 840)
         self._build(home, save)
+        theme = getattr(QApplication.instance(), "windows_theme", None)
+        if theme is not None:
+            theme.changed.connect(self._schedule_refresh)
         self._updates = QTimer(self, singleShot=True, interval=0)
         self._updates.timeout.connect(self._refresh_navigation)
         self.client.workspace_changed.connect(self._schedule_refresh)
@@ -73,9 +76,14 @@ class ProjectWindow(QMainWindow):
         layout.setSpacing(0)
         header = QFrame(objectName="masthead")
         toolbar = QHBoxLayout(header)
-        toolbar.setContentsMargins(12, 8, 12, 8)
+        toolbar.setContentsMargins(16, 12, 16, 12)
+        toolbar.setSpacing(8)
         toolbar.addWidget(self._button("返回首页", home))
-        toolbar.addWidget(self._button("保存项目", save))
+        save_button = self._button("保存项目", save)
+        save_button.setShortcut("Ctrl+S")
+        save_button.setToolTip("保存项目 (Ctrl+S)")
+        save_button.setObjectName("primary")
+        toolbar.addWidget(save_button)
         self.report_button = self._button("导出联调报告…", self._open_report)
         toolbar.addWidget(self.report_button)
         toolbar.addWidget(QLabel("项目工作区", objectName="title"))
@@ -92,6 +100,8 @@ class ProjectWindow(QMainWindow):
         self.tree.setObjectName("projectTree")
         self.tree.setAccessibleName("项目树")
         self.tree.setHeaderLabels(["项目导航"])
+        self.tree.setHeaderHidden(True)
+        self.tree.setIndentation(16)
         self.tree.setMinimumWidth(148)
         self.tree.setUniformRowHeights(True)
         self.tree.setTextElideMode(Qt.TextElideMode.ElideRight)
@@ -102,7 +112,8 @@ class ProjectWindow(QMainWindow):
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(0)
         context = QHBoxLayout()
-        context.setContentsMargins(10, 6, 10, 0)
+        context.setContentsMargins(16, 12, 16, 4)
+        context.setSpacing(8)
         self.nav_button = self._button("项目树", self._toggle_tree)
         self.nav_button.setCheckable(True)
         self.nav_button.setChecked(self._layout.navigation_visible)
@@ -140,8 +151,8 @@ class ProjectWindow(QMainWindow):
 
         journal = QWidget()
         journal_layout = QVBoxLayout(journal)
-        journal_layout.setContentsMargins(8, 4, 8, 8)
-        journal_layout.setSpacing(4)
+        journal_layout.setContentsMargins(16, 8, 16, 16)
+        journal_layout.setSpacing(8)
         self.log_button = self._button("请求日志与报文", self._toggle_journal)
         self.log_button.setCheckable(True)
         self.log_button.setChecked(self._layout.journal_visible)
@@ -379,8 +390,8 @@ class ProjectWindow(QMainWindow):
         item = self._items[key]
         item.setText(0, f"[{'异常' if error else state}]  {name}")
         item.setToolTip(0, "\n".join(filter(None, (name, endpoint, str(state), error))))
-        item.setForeground(0, QColor("#8d470c" if error else "#154c47" if state in
-                                     (ConnectionState.ONLINE, ListenerState.LISTENING) else "#405970"))
+        item.setForeground(0, status_color(self.tree, "warning" if error else "success" if state in
+                                          (ConnectionState.ONLINE, ListenerState.LISTENING) else "secondary"))
 
     def _locate_error(self):
         keys = tuple(self._errors)
