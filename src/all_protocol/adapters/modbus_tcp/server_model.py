@@ -95,6 +95,15 @@ class ServerPlan:
     port: int = 1502
     stations: tuple[Station, ...] = ()
 
+    def copy_station(self, source_id: int, unit_id: int, name: str = ""):
+        source = next((station for station in self.stations if station.unit_id == source_id), None)
+        if source is None:
+            raise ValueError(f"源 Unit ID {source_id} 不存在")
+        copied = replace(source, unit_id=unit_id, name=name)
+        plan = replace(self, stations=self.stations + (copied,))
+        plan.validate()
+        return plan
+
     def validate(self, *, starting: bool = False):
         if not isinstance(self.host, str) or not self.host or any(char.isspace() for char in self.host):
             raise ValueError("请输入有效的监听地址")

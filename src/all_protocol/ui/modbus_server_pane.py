@@ -1,8 +1,9 @@
 from dataclasses import replace
+from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMessageBox, QSplitter, QTabBar, QVBoxLayout,
+    QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QMessageBox, QSplitter, QTabBar, QVBoxLayout,
 )
 
 from ..adapters.modbus_tcp.model import RULES, Area, data_types
@@ -10,6 +11,9 @@ from ..adapters.modbus_tcp.server import ValuesChanged
 from ..adapters.modbus_tcp.server_model import ModbusServerTarget, ServerPlan, Station
 from ..adapters.modbus_tcp.values import DataType, RegisterOrder
 from ..application.server_contracts import ListenerState, RequestMetadata, ServerEvent
+from ..modbus_points import append_station_points, export_station_points, import_station_points
+from ..point_tables import IMPORT_LIMIT_BYTES
+from ..storage import _replace_file
 from .main_window import Rows, _heading, _panel, _table
 from .modbus_tcp_form import order_picker
 from .server_pane import ServerPane
@@ -77,6 +81,9 @@ class ModbusServerPane(ServerPane):
         self.edit_station = self._button(station_actions, "编辑", lambda: self._edit_station(False))
         self.remove_station = self._button(station_actions, "删除", self._delete_station)
         station_layout.addLayout(station_actions)
+        copy_actions = QHBoxLayout()
+        self.copy_station = self._button(copy_actions, "复制从站…", self._copy_station)
+        station_layout.addLayout(copy_actions)
 
         point_panel, point_layout = _panel()
         point_layout.addWidget(_heading("点位 · 0 基偏移"))
@@ -91,6 +98,11 @@ class ModbusServerPane(ServerPane):
         self.point_table.horizontalHeader().setStretchLastSection(False)
         self.point_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         point_layout.addWidget(self.point_table, 1)
+        transfer_actions = QHBoxLayout()
+        self.import_points = self._button(transfer_actions, "导入点位…", self._import_points)
+        self.export_points = self._button(transfer_actions, "导出点位…", self._export_points)
+        transfer_actions.addStretch()
+        point_layout.addLayout(transfer_actions)
         point_actions = QHBoxLayout()
         self.add_point = self._button(point_actions, "添加点位", lambda: self._edit_point("add"))
         self.batch_points = self._button(point_actions, "批量添加", lambda: self._edit_point("batch"))
@@ -99,7 +111,8 @@ class ModbusServerPane(ServerPane):
         point_actions.addStretch()
         self.bit_button = self._button(point_actions, "位查看…", lambda: show_bit_inspector(self, self._bit_reading))
         self.edit_value = self._button(point_actions, "修改当前值", self._edit_current)
-        self.plan_controls = (self.save, self.add_station, self.edit_station, self.remove_station,
+        self.plan_controls = (self.save, self.add_station, self.edit_station, self.remove_station, self.copy_station,
+                              self.import_points, self.export_points,
                               self.add_point, self.batch_points, self.edit_point, self.remove_point)
         point_layout.addLayout(point_actions)
         config = QSplitter(Qt.Orientation.Horizontal)
@@ -227,6 +240,75 @@ class ModbusServerPane(ServerPane):
         self._stations = self._stations[:row] + self._stations[row + 1:]
         self._show_stations(row)
 
+    def _copy_station(self):
+        source = self._station
+        if source is None or self.state != ListenerState.STOPPED:
+            return
+        used = {station.unit_id for station in self._stations}
+        unit_id = spinbox(1, 255, next((unit for unit in range(1, 256) if unit not in used), 1))
+        name = QLineEdit(source.name + " 副本" if source.name else "")
+
+        def commit():
+            plan = self._plan().copy_station(source.unit_id, unit_id.value(), name.text().strip())
+            self._stations = plan.stations
+            self._show_stations(len(self._stations) - 1)
+
+        dialog = EditDialog(self, "复制从站", commit)
+        dialog.form.addRow("源从站", QLabel(f"Unit {source.unit_id} · {len(source.points)} 个点位（全部数据区）"))
+        dialog.form.addRow("目标 Unit ID", unit_id)
+        dialog.form.addRow("名称（可选）", name)
+        dialog.form.addRow(QLabel("复制点位定义、初始值和场景规则。复制后请保存方案或应用到项目。"))
+        dialog.exec()
+        dialog.deleteLater()
+
+    def _import_points(self):
+        station = self._station
+        if station is None or self.state != ListenerState.STOPPED:
+            return
+        selected, _ = QFileDialog.getOpenFileName(self, "导入点位到当前从站", "", "点位配置 (*.json *.csv)")
+        if not selected:
+            return
+        try:
+            path = Path(selected)
+            with path.open("rb") as stream:
+                contents = stream.read(IMPORT_LIMIT_BYTES + 1)
+            if len(contents) > IMPORT_LIMIT_BYTES:
+                raise ValueError("点位文件超过 10 MiB")
+            points = import_station_points(contents.decode("utf-8-sig"), csv_format=path.suffix.lower() == ".csv")
+            updated = append_station_points(station, points)
+        except (OSError, ValueError) as error:
+            self._feedback(f"导入失败 · {error}")
+            return
+        if not points:
+            self._feedback("文件没有点位，未修改当前从站。")
+            return
+        message = (f"向 Unit {station.unit_id} 追加 {len(points)} 个点位（全部数据区），"
+                   f"导入后共 {len(updated.points)} 个。\n保留现有点位，导入后请保存方案或应用到项目。")
+        if QMessageBox.question(self, "确认导入点位", message,
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            self._replace_station(updated)
+            self._feedback(f"已导入 {len(points)} 个点位，请保存方案或应用到项目。")
+
+    def _export_points(self):
+        station = self._station
+        if station is None:
+            return
+        selected, selected_filter = QFileDialog.getSaveFileName(
+            self, "导出当前从站全部点位", f"unit-{station.unit_id}-points.json", "JSON (*.json);;CSV (*.csv)")
+        if not selected:
+            return
+        path = Path(selected)
+        if not path.suffix:
+            path = path.with_suffix(".csv" if selected_filter.startswith("CSV") else ".json")
+        try:
+            csv_format = path.suffix.lower() == ".csv"
+            contents = export_station_points(station, csv_format=csv_format)
+            _replace_file(path, contents.encode("utf-8-sig" if csv_format else "utf-8"))
+            self._feedback(f"已导出 Unit {station.unit_id} 的 {len(station.points)} 个点位（配置初始值）。")
+        except (OSError, ValueError) as error:
+            self._feedback(f"导出失败 · {error}")
+
     def _replace_station(self, station):
         row = self.station_list.currentRow()
         self._stations = self._stations[:row] + (station,) + self._stations[row + 1:]
@@ -329,8 +411,10 @@ class ModbusServerPane(ServerPane):
     def _refresh(self, *_):
         idle, running = self._refresh_listener()
         self.add_station.setEnabled(idle)
-        for control in (self.edit_station, self.remove_station, self.add_point, self.batch_points):
+        for control in (self.edit_station, self.remove_station, self.add_point, self.batch_points, self.import_points):
             control.setEnabled(idle and self._station is not None)
+        self.copy_station.setEnabled(idle and self._station is not None and len(self._stations) < 255)
+        self.export_points.setEnabled(self._station is not None)
         for control in (self.edit_point, self.remove_point):
             control.setEnabled(idle and self._point is not None)
         self.edit_value.setEnabled(running and self._point is not None)
