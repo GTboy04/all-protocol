@@ -83,7 +83,7 @@ def test_create_save_open_dual_protocol_project_without_network(desktop, monkeyp
     s7._memory.set_point(s7._points[0], 987)
     assert all(server.tabs.widget(index).state == ListenerState.STOPPED for index in range(2))
     assert s7.save.text() == "应用到项目"
-    path = tmp_path / "项目.allprotocol.json"
+    path = tmp_path / "项目.allprotocol"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(path), ""))
     home.project_buttons["保存项目"].click()
     project = ProjectFile().open(path)
@@ -144,7 +144,7 @@ def test_save_cancel_and_failure_leave_current_path_and_dirty_state(desktop, mon
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: ("", ""))
     assert not home._save_project()
     assert home.workspace.file.path is None and home.workspace.file.saved is None
-    path = tmp_path / "good.json"
+    path = tmp_path / "good.allprotocol"
     home.workspace.file.save(home.workspace.project, path)
     home._open_client()
     client = home.project_window.client
@@ -162,7 +162,7 @@ def test_closed_client_edits_survive_and_removed_device_is_not_readded(desktop, 
     home._open_client()
     client = home.project_window.client
     client._form.connection.host.setText("192.0.2.1")
-    save_path = tmp_path / "first.json"
+    save_path = tmp_path / "first.allprotocol"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(save_path), ""))
     QTimer.singleShot(0, lambda: choose_button(app, QMessageBox.ButtonRole.AcceptRole))
     home.project_window.close()
@@ -178,7 +178,7 @@ def test_closed_client_edits_survive_and_removed_device_is_not_readded(desktop, 
             break
         QTest.qWait(10)
     assert not home.workspace.project.devices
-    path = tmp_path / "project.json"
+    path = tmp_path / "project.allprotocol"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(path), ""))
     assert home._save_project(save_as=True)
     assert not ProjectFile().open(path).devices
@@ -188,11 +188,11 @@ def test_closed_client_edits_survive_and_removed_device_is_not_readded(desktop, 
 def test_save_as_selects_copy_and_preserves_source(desktop, monkeypatch, tmp_path):
     _app, home, errors = desktop
     home.workspace = ProjectWorkspace(Project("项目"))
-    source = tmp_path / "source.json"
+    source = tmp_path / "source.allprotocol"
     home.workspace.file.save(home.workspace.project, source)
     before = source.read_bytes()
     home.workspace.project = replace(home.workspace.project, name="副本")
-    target = tmp_path / "copy.json"
+    target = tmp_path / "copy.allprotocol"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(target), ""))
     assert home._save_project_as()
     assert home.workspace.file.path == target
@@ -223,7 +223,7 @@ def test_switching_project_devices_retains_unconnected_edits(desktop, monkeypatc
     assert home._capture_client()
     client._form.connection.host.setText("192.0.2.2")
     assert home._capture_client()
-    save_path = tmp_path / "first.json"
+    save_path = tmp_path / "first.allprotocol"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(save_path), ""))
     QTimer.singleShot(0, lambda: choose_button(app, QMessageBox.ButtonRole.AcceptRole))
     home.project_window.close()
@@ -250,7 +250,7 @@ def test_close_project_save_and_discard_paths(desktop, monkeypatch, tmp_path):
     home.project_window.client._form.connection.host.setText("192.0.2.1")
     home._open_server()
     home.project_window.servers.tabs.widget(0).port.setValue(4502)
-    path = tmp_path / "saved.json"
+    path = tmp_path / "saved.allprotocol"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(path), ""))
     QTimer.singleShot(0, lambda: choose_button(app, QMessageBox.ButtonRole.AcceptRole))
     assert home.close()

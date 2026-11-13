@@ -100,6 +100,28 @@ def select(window, kind, key):
     window.tree.setCurrentItem(window._items[kind, key])
 
 
+def test_log_focus_restores_layout_and_does_not_save_temporary_sizes(workspace):
+    app, home, _ = workspace
+    window = home.project_window
+    before = window._current_layout()
+    window.focus_logs.click()
+    app.processEvents()
+    assert window.navigation.isHidden()
+    assert window.logs.height() > window.height() * .65
+    window._remember_journal()
+    assert window._current_layout() == before
+    window.focus_logs.click()
+    app.processEvents()
+    assert window.navigation.isVisible()
+    assert window._current_layout() == before
+    window.focus_logs.click()
+    window.log_button.click()
+    assert window.navigation.isVisible()
+    assert not window.focus_logs.isChecked() and window.logs.isHidden()
+    window.focus_logs.click()
+    assert window.log_button.isChecked() and not window.logs.isHidden()
+
+
 def test_read_only_bits_use_typed_server_values_and_sample_quality(workspace):
     from all_protocol.application.sampling import Sample, Quality
 

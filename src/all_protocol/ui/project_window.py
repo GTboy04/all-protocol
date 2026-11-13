@@ -156,7 +156,16 @@ class ProjectWindow(QMainWindow):
         self.log_button = self._button("请求日志与报文", self._toggle_journal)
         self.log_button.setCheckable(True)
         self.log_button.setChecked(self._layout.journal_visible)
-        journal_layout.addWidget(self.log_button, alignment=Qt.AlignmentFlag.AlignLeft)
+        log_controls = QHBoxLayout()
+        log_controls.addWidget(self.log_button)
+        self.log_context = _ContextLabel("resultContext")
+        log_controls.addWidget(self.log_context, 1)
+        self.focus_logs = self._button("专注日志", self._focus_journal)
+        self.focus_logs.setCheckable(True)
+        self.focus_logs.setShortcut("Ctrl+Shift+L")
+        self.focus_logs.setToolTip("展开日志阅读区域 / 返回工作区 (Ctrl+Shift+L)")
+        log_controls.addWidget(self.focus_logs)
+        journal_layout.addLayout(log_controls)
         self.logs = QStackedWidget()
         self.logs.setAccessibleName("当前视图的请求日志与报文")
         self.logs.addWidget(self.client.journal_panel)
@@ -200,6 +209,9 @@ class ProjectWindow(QMainWindow):
             self._restore_navigation_size()
 
     def _toggle_journal(self, visible):
+        if not visible and self.focus_logs.isChecked():
+            self.focus_logs.setChecked(False)
+            self._focus_journal(False)
         self.logs.setVisible(visible)
         self.log_button.setText("收起日志与报文" if visible else "展开日志与报文")
         self.vertical.handle(1).setVisible(visible)
@@ -211,6 +223,16 @@ class ProjectWindow(QMainWindow):
             self._restore_journal_size()
         else:
             self.vertical.setSizes([self.vertical.height() - collapsed, collapsed])
+
+    def _focus_journal(self, focused):
+        if focused:
+            self.log_button.setChecked(True)
+            self._toggle_journal(True)
+        self.navigation.setVisible(not focused)
+        self.focus_logs.setText("返回工作区" if focused else "专注日志")
+        self.vertical.handle(1).setVisible(not focused and self.log_button.isChecked())
+        if not focused:
+            self._restore_journal_size()
 
     def _restore_journal_size(self):
         height = self.vertical.height() - self.vertical.handleWidth()
@@ -225,7 +247,7 @@ class ProjectWindow(QMainWindow):
         self._layout = replace(self._layout, navigation=self._ratio(self.navigation.sizes(), 0))
 
     def _remember_journal(self, *_):
-        if self.log_button.isChecked():
+        if self.log_button.isChecked() and not self.focus_logs.isChecked():
             self._layout = replace(self._layout, journal=self._ratio(self.vertical.sizes(), 1))
 
     def _current_layout(self):
@@ -373,6 +395,7 @@ class ProjectWindow(QMainWindow):
             context = self._panes[value][1] if self._on_server else names.get(value, "新设备配置")
             error_key = ("server" if self._on_server else "device", value)
         self.context.describe(context)
+        self.log_context.describe(context)
         _, detail = errors.get(error_key, ("", ""))
         self.issue.describe(detail)
         self.issue.setVisible(bool(detail))

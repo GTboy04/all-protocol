@@ -1,9 +1,13 @@
+"""Local SQLite repositories and codecs shared with portable project files.
+
+The *_path attributes naming JSON/JSONL files are migration sources only.
+All current writes go to database_path.
+"""
+
 import json
-from collections import deque
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from os import SEEK_END
 from pathlib import Path
 
 from PySide6.QtCore import QIODevice, QLockFile, QSaveFile
@@ -20,6 +24,7 @@ from .application.journal import VISIBLE_LOG_ROWS, LogRetention, RetainedLog
 from .application.server_contracts import LifecycleAction, RequestMetadata, ServerEvent, ServerLifecycle
 from .application.simulation import decode_rule
 from .point_tables import decode_target, target_record
+from .database import DATABASE_NAME, connect, dumps, get_meta, set_meta, read_plan, write_plan
 
 
 LOG_LIMIT_BYTES = 5 * 1024 * 1024
@@ -130,51 +135,84 @@ def _locked(directory: Path, name: str):
         lock.unlock()
 
 
-def _read_journal(path: Path, decode):
-    if not path.exists():
-        return RetainedLog()
-    if path.stat().st_size > LOG_LIMIT_BYTES:
-        path.unlink()
-        return RetainedLog(retention=LogRetention(rotated_at=datetime.now().astimezone()))
-    recent = deque(maxlen=VISIBLE_LOG_ROWS)
-    rotated_at = None
-    clipped = incomplete = False
-    with path.open("rb") as journal:
-        for line in journal:
+def _insert_journal(connection, stream, record):
+    payload = dumps(record)
+    size = len((payload + "\n").encode("utf-8"))
+    connection.execute(
+        "INSERT INTO journal_entries(stream, time, protocol, endpoint, payload, size_bytes) VALUES (?, ?, ?, ?, ?, ?)",
+        (stream, record["time"], record.get("protocol", ""), record.get("endpoint", ""), payload, size),
+    )
+
+
+def _migrate_journal(connection, stream, path, decode):
+    marker = "migrated:" + path.name
+    if get_meta(connection, marker) is not None:
+        return
+    connection.execute("INSERT OR IGNORE INTO journal_state(stream) VALUES (?)", (stream,))
+    if path.exists():
+        if path.stat().st_size > LOG_LIMIT_BYTES:
+            connection.execute("UPDATE journal_state SET rotated_at=? WHERE stream=?",
+                               (datetime.now().astimezone().isoformat(), stream))
+        else:
+            with path.open("rb") as journal:
+                for line in journal:
+                    try:
+                        record = json.loads(line)
+                        if not isinstance(record, dict):
+                            raise ValueError("Expected a journal record")
+                        if set(record) == {"journal_rotated_at"}:
+                            rotated = datetime.fromisoformat(record["journal_rotated_at"]).isoformat()
+                            connection.execute("UPDATE journal_state SET rotated_at=? WHERE stream=?", (rotated, stream))
+                        else:
+                            decode(dict(record))
+                            _insert_journal(connection, stream, record)
+                    except (ValueError, TypeError, KeyError):
+                        connection.execute("UPDATE journal_state SET incomplete=1 WHERE stream=?", (stream,))
+    set_meta(connection, marker, "1")
+
+
+def _read_database_log(directory, stream, legacy_path, decode):
+    with connect(directory / DATABASE_NAME) as connection:
+        _migrate_journal(connection, stream, legacy_path, decode)
+        size, count = connection.execute(
+            "SELECT coalesce(sum(size_bytes), 0), count(*) FROM journal_entries WHERE stream=?", (stream,)
+        ).fetchone()
+        if size > LOG_LIMIT_BYTES:
+            connection.execute("DELETE FROM journal_entries WHERE stream=?", (stream,))
+            connection.execute("UPDATE journal_state SET rotated_at=?, incomplete=0 WHERE stream=?",
+                               (datetime.now().astimezone().isoformat(), stream))
+            count = 0
+        rotated, incomplete = connection.execute(
+            "SELECT rotated_at, incomplete FROM journal_state WHERE stream=?", (stream,)
+        ).fetchone()
+        recent = []
+        for (payload,) in connection.execute(
+            "SELECT payload FROM journal_entries WHERE stream=? ORDER BY id DESC LIMIT ?", (stream, VISIBLE_LOG_ROWS)
+        ):
             try:
-                data = json.loads(line)
-                if not isinstance(data, dict):
-                    raise ValueError("Expected a journal record")
-                if set(data) == {"journal_rotated_at"}:
-                    rotated_at = datetime.fromisoformat(data["journal_rotated_at"])
-                    continue
-                entry = decode(data)
-                clipped |= len(recent) == VISIBLE_LOG_ROWS
-                recent.append(entry)
+                recent.append(decode(json.loads(payload)))
             except (ValueError, TypeError, KeyError):
                 incomplete = True
-    return RetainedLog(tuple(reversed(recent)), LogRetention(rotated_at, clipped, incomplete))
+        return RetainedLog(tuple(recent), LogRetention(
+            datetime.fromisoformat(rotated) if rotated else None, count > VISIBLE_LOG_ROWS, bool(incomplete)))
 
 
-def _append_journal(path: Path, record: dict) -> bool:
-    line = _json_bytes(record)
-    if len(line) > LOG_LIMIT_BYTES:
+def _append_database_log(directory, stream, legacy_path, decode, record):
+    size = len(_json_bytes(record))
+    if size > LOG_LIMIT_BYTES:
         raise OSError("单条日志超过 5 MB")
-    with path.open("a+b") as journal:
-        size = journal.seek(0, SEEK_END)
-        separator = b""
-        if size:
-            journal.seek(-1, SEEK_END)
-            if journal.read(1) != b"\n":
-                separator = b"\n"
-        if size + len(separator) + len(line) <= LOG_LIMIT_BYTES:
-            journal.write(separator + line)
-            return False
-    rotated = _json_bytes({"journal_rotated_at": datetime.now().astimezone().isoformat()}) + line
-    if len(rotated) > LOG_LIMIT_BYTES:
-        raise OSError("单条日志与轮换标记超过 5 MB")
-    _replace_file(path, rotated)
-    return True
+    with connect(directory / DATABASE_NAME) as connection:
+        _migrate_journal(connection, stream, legacy_path, decode)
+        total = connection.execute(
+            "SELECT coalesce(sum(size_bytes), 0) FROM journal_entries WHERE stream=?", (stream,)
+        ).fetchone()[0]
+        rotated = total + size > LOG_LIMIT_BYTES
+        if rotated:
+            connection.execute("DELETE FROM journal_entries WHERE stream=?", (stream,))
+            connection.execute("UPDATE journal_state SET rotated_at=?, incomplete=0 WHERE stream=?",
+                               (datetime.now().astimezone().isoformat(), stream))
+        _insert_journal(connection, stream, record)
+        return rotated
 
 
 class LocalHistory:
@@ -183,49 +221,65 @@ class LocalHistory:
         self.profiles_path = directory / "connections.json"
         self.journal_path = directory / "requests.jsonl"
 
-    def _locked(self):
-        return _locked(self.directory, "history.lock")
+    @property
+    def database_path(self):
+        return self.directory / DATABASE_NAME
 
-    def _read_profiles(self) -> tuple[ConnectionProfile, ...]:
+    def _migrate_profiles(self, connection):
+        if get_meta(connection, "migrated:connections.json") is not None:
+            return
         try:
-            data = json.loads(self.profiles_path.read_bytes())
-        except (FileNotFoundError, ValueError):
-            return ()
-        if not isinstance(data, list):
-            return ()
-        return tuple(profile for item in data if (profile := _load_profile(item)) is not None)
+            raw = json.loads(self.profiles_path.read_bytes())
+        except FileNotFoundError:
+            raw = []
+        if not isinstance(raw, list):
+            raise ValueError("本地连接配置不是列表")
+        profiles = tuple(_load_profile(item) for item in raw)
+        if any(profile is None for profile in profiles):
+            raise ValueError("本地连接配置包含无效记录")
+        for profile in reversed(profiles):
+            self._store_profile(connection, profile)
+        set_meta(connection, "migrated:connections.json", "1")
+
+    @staticmethod
+    def _store_profile(connection, profile):
+        connection.execute("DELETE FROM connections WHERE protocol=? AND endpoint=?", profile.key)
+        connection.execute("INSERT INTO connections(protocol, endpoint, fields, interval_ms) VALUES (?, ?, ?, ?)",
+                           (*profile.key, dumps(profile.fields), profile.interval_ms))
+
+    @staticmethod
+    def _read_profiles(connection):
+        return tuple(ConnectionProfile(protocol, endpoint, json.loads(fields), interval)
+                     for protocol, endpoint, fields, interval in connection.execute(
+                         "SELECT protocol, endpoint, fields, interval_ms FROM connections ORDER BY position DESC"))
 
     def profiles(self) -> tuple[ConnectionProfile, ...]:
-        with self._locked():
-            return self._read_profiles()
-
-    def _write_profiles(self, profiles: tuple[ConnectionProfile, ...]):
-        contents = json.dumps([asdict(item) for item in profiles], ensure_ascii=False, indent=2)
-        _replace_file(self.profiles_path, (contents + "\n").encode("utf-8"))
+        with connect(self.database_path) as connection:
+            self._migrate_profiles(connection)
+            return self._read_profiles(connection)
 
     def remember(self, profile: ConnectionProfile) -> tuple[ConnectionProfile, ...]:
-        with self._locked():
-            profiles = self._read_profiles()
+        if _load_profile(asdict(profile)) is None:
+            raise ValueError("连接配置无效")
+        with connect(self.database_path) as connection:
+            self._migrate_profiles(connection)
+            profiles = self._read_profiles(connection)
             if profiles and profiles[0] == profile:
                 return profiles
-            updated = (profile,) + tuple(item for item in profiles if item.key != profile.key)
-            self._write_profiles(updated)
-            return updated
+            self._store_profile(connection, profile)
+            return self._read_profiles(connection)
 
     def forget(self, profile: ConnectionProfile) -> tuple[ConnectionProfile, ...]:
-        with self._locked():
-            profiles = self._read_profiles()
-            updated = tuple(item for item in profiles if item.key != profile.key)
-            if updated != profiles:
-                self._write_profiles(updated)
-            return updated
+        with connect(self.database_path) as connection:
+            self._migrate_profiles(connection)
+            connection.execute("DELETE FROM connections WHERE protocol=? AND endpoint=?", profile.key)
+            return self._read_profiles(connection)
 
     def recent_entries(self) -> tuple[JournalEntry, ...]:
         return self.read_log().entries
 
     def read_log(self) -> RetainedLog[JournalEntry]:
-        with self._locked():
-            return _read_journal(self.journal_path, _load_entry)
+        return _read_database_log(self.directory, "client", self.journal_path, _load_entry)
 
     def append_entry(self, entry: JournalEntry) -> bool:
         """Append an entry and report whether the previous journal was cleared."""
@@ -242,8 +296,7 @@ class LocalHistory:
             record["write"]["target"] = encoded
         if entry.verification is None:
             del record["verification"]
-        with self._locked():
-            return _append_journal(self.journal_path, record)
+        return _append_database_log(self.directory, "client", self.journal_path, _load_entry, record)
 
 
 def _text(data: dict, field: str) -> str:
@@ -271,7 +324,6 @@ def _request_metadata(data: dict, details: dict) -> RequestMetadata:
 
 class _ServerJournal:
     _journal_protocol: str
-    _journal_lock: str
     _legacy_detail_types: dict
     directory: Path
     journal_path: Path
@@ -304,8 +356,7 @@ class _ServerJournal:
         return self.read_log().entries
 
     def read_log(self) -> RetainedLog[ServerEvent]:
-        with _locked(self.directory, self._journal_lock):
-            return _read_journal(self.journal_path, self._decode_event)
+        return _read_database_log(self.directory, self._journal_protocol, self.journal_path, self._decode_event)
 
     def append_event(self, event: ServerEvent) -> bool:
         if event.protocol != self._journal_protocol:
@@ -321,8 +372,7 @@ class _ServerJournal:
             record.update(kind="lifecycle", action=payload.action, result=payload.result)
         else:
             raise ValueError("Only request and lifecycle events can be stored")
-        with _locked(self.directory, self._journal_lock):
-            return _append_journal(self.journal_path, record)
+        return _append_database_log(self.directory, self._journal_protocol, self.journal_path, self._decode_event, record)
 
 
 def _point_record(point) -> dict:
@@ -370,7 +420,6 @@ def decode_modbus_plan(data) -> ServerPlan:
 
 class ServerStorage(_ServerJournal):
     _journal_protocol = "modbus-tcp"
-    _journal_lock = "server-journal.lock"
     _legacy_detail_types = dict.fromkeys(("unit_id", "function", "offset", "count"), (int, type(None)))
 
     def __init__(self, directory: Path):
@@ -378,18 +427,16 @@ class ServerStorage(_ServerJournal):
         self.plan_path = directory / "modbus-tcp-server.json"
         self.journal_path = directory / "server-requests.jsonl"
 
+    @property
+    def database_path(self):
+        return self.directory / DATABASE_NAME
+
     def load_plan(self) -> ServerPlan:
-        try:
-            data = json.loads(self.plan_path.read_bytes())
-        except FileNotFoundError:
-            return ServerPlan()
-        return decode_modbus_plan(data)
+        return _load_database_plan(self, decode_modbus_plan, encode_modbus_plan, ServerPlan)
 
     def save_plan(self, plan: ServerPlan):
-        plan.validate()
-        record = encode_modbus_plan(plan)
-        with _locked(self.directory, "server-plan.lock"):
-            _replace_file(self.plan_path, _json_bytes(record))
+        _save_database_plan(self, plan, encode_modbus_plan)
+
 
 def encode_s7_plan(plan: S7ServerPlan) -> dict:
     points = [_point_record(point) for point in plan.points]
@@ -419,7 +466,6 @@ def decode_s7_plan(data) -> S7ServerPlan:
 
 class S7ServerStorage(_ServerJournal):
     _journal_protocol = "s7"
-    _journal_lock = "s7-server-journal.lock"
     _legacy_detail_types = {"function": (int, type(None)), "target": (str,)}
 
     def __init__(self, directory: Path):
@@ -427,15 +473,37 @@ class S7ServerStorage(_ServerJournal):
         self.plan_path = directory / "s7-server.json"
         self.journal_path = directory / "s7-server-requests.jsonl"
 
+    @property
+    def database_path(self):
+        return self.directory / DATABASE_NAME
+
     def load_plan(self) -> S7ServerPlan:
-        try:
-            data = json.loads(self.plan_path.read_bytes())
-        except FileNotFoundError:
-            return S7ServerPlan()
-        return decode_s7_plan(data)
+        return _load_database_plan(self, decode_s7_plan, encode_s7_plan, S7ServerPlan)
 
     def save_plan(self, plan: S7ServerPlan):
-        plan.validate()
-        record = encode_s7_plan(plan)
-        with _locked(self.directory, "s7-server-plan.lock"):
-            _replace_file(self.plan_path, _json_bytes(record))
+        _save_database_plan(self, plan, encode_s7_plan)
+
+
+def _load_database_plan(storage, decode, encode, default):
+    with connect(storage.database_path) as connection:
+        record = read_plan(connection, storage._journal_protocol)
+        if record is not None:
+            return decode(record)
+        marker = "migrated:" + storage.plan_path.name
+        if get_meta(connection, marker) is None:
+            try:
+                record = json.loads(storage.plan_path.read_bytes())
+            except FileNotFoundError:
+                record = encode(default())
+            plan = decode(record)
+            write_plan(connection, encode(plan))
+            set_meta(connection, marker, "1")
+            return plan
+        return default()
+
+
+def _save_database_plan(storage, plan, encode):
+    plan.validate()
+    with connect(storage.database_path) as connection:
+        write_plan(connection, encode(plan))
+        set_meta(connection, "migrated:" + storage.plan_path.name, "1")

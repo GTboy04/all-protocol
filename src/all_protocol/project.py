@@ -13,6 +13,7 @@ from .adapters.s7.model import Area as S7Area, DataType as S7DataType, S7Config,
 from .adapters.s7.server_model import S7ServerPlan
 from .application.contracts import ClientError
 from .point_tables import PointTable, decode_table, table_record
+from .database import SQLITE_HEADER, encode_project_database, decode_project_database
 from .storage import (
     ConnectionProfile, LocalHistory, ServerStorage, S7ServerStorage,
     _load_profile, _locked, _replace_file, decode_modbus_plan, decode_s7_plan, encode_modbus_plan, encode_s7_plan,
@@ -213,7 +214,9 @@ class ProjectFile:
         path = path.resolve()
         contents = _read_bytes(path)
         try:
-            project = decode_project(json.loads(contents, parse_constant=_reject_constant))
+            record = (decode_project_database(contents) if contents.startswith(SQLITE_HEADER) else
+                      json.loads(contents, parse_constant=_reject_constant))
+            project = decode_project(record)
         except (UnicodeError, RecursionError) as error:
             raise ValueError("项目文件不是有效的 UTF-8 JSON") from error
         self.path, self._contents, self.saved = path, contents, deepcopy(project)
@@ -223,8 +226,8 @@ class ProjectFile:
         path = path.resolve()
         record = project_record(project)
         # Also validate in-memory configuration before touching the destination.
-        contents = (json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
-        decode_project(json.loads(contents))
+        decode_project(json.loads(json.dumps(record, allow_nan=False)))
+        contents = encode_project_database(record)
         if len(contents) > PROJECT_LIMIT_BYTES:
             raise ValueError("项目文件超过 10 MiB")
         with _locked(path.parent, path.name + ".lock"):
@@ -244,18 +247,9 @@ class ProjectWorkspace:
     @classmethod
     def from_local(cls, name: str, directory: Path) -> "ProjectWorkspace":
         history = LocalHistory(directory)
-        # Import must not silently drop malformed history entries.
-        try:
-            raw = json.loads(history.profiles_path.read_bytes())
-        except FileNotFoundError:
-            raw = []
-        if not isinstance(raw, list):
-            raise ValueError("本地连接配置不是列表")
+        profiles = history.profiles()
         project = Project(name, modbus=ServerStorage(directory).load_plan(), s7=S7ServerStorage(directory).load_plan())
-        for item in reversed(raw):
-            profile = _load_profile(item)
-            if profile is None:
-                raise ValueError("本地连接配置包含无效记录")
+        for profile in reversed(profiles):
             project = project.remember(profile)
         project = decode_project(project_record(project))
         return cls(project)

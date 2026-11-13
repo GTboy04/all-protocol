@@ -5,7 +5,7 @@ from datetime import datetime
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QWidget,
 )
 
 from ..application.diagnostics import DiagnosticRow
@@ -19,6 +19,7 @@ from .diagnostics_dialog import DiagnosticsDialog
 from .fault_dialog import FaultDialog
 from .simulation_dialog import SimulationDialog
 from .widgets import add_field, spinbox
+from .journal_view import JournalView
 
 
 class ServerPane(QWidget):
@@ -141,11 +142,6 @@ class ServerPane(QWidget):
     def _journal_panel(self, headers, format_row, numbers=(), monospace=()):
         panel, layout = _panel()
         self.journal_heading = _heading("请求日志")
-        header = QHBoxLayout()
-        header.addWidget(self.journal_heading)
-        self._button(header, "请求诊断…", self._open_diagnostics)
-        header.addStretch()
-        layout.addLayout(header)
         self.journal_panel = panel
         self.requests = Rows(headers, format_row, numbers, monospace)
         table = self.request_table = _table(self.requests)
@@ -156,12 +152,12 @@ class ServerPane(QWidget):
         self.detail.setObjectName("packetDetail")
         self.detail.setAccessibleName("RX / TX 报文详情")
         table.selectionModel().currentRowChanged.connect(self._show_request)
-        split = QSplitter(Qt.Orientation.Horizontal)
-        split.setChildrenCollapsible(False)
-        split.addWidget(table)
-        split.addWidget(self.detail)
-        split.setSizes([710, 350])
-        layout.addWidget(split, 1)
+        self.journal_view = JournalView(table, self.detail, "服务端 · 请求日志与报文")
+        self.journal_view.actions.insertWidget(0, self.journal_heading)
+        diagnostics = QPushButton("请求诊断…")
+        diagnostics.clicked.connect(self._open_diagnostics)
+        self.journal_view.actions.insertWidget(1, diagnostics)
+        layout.addWidget(self.journal_view, 1)
         return panel
 
     def show_workspace_values(self, current):

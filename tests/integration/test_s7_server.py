@@ -123,11 +123,13 @@ def test_s7_server_plan_and_journal_round_trip(tmp_path):
     request = RequestMetadata(legacy["peer"], "成功", b"\x01", b"\x02", (("function", 4), ("target", "DB1")))
     start = ServerEvent("s7", "127.0.0.1:1102", now, ServerLifecycle(LifecycleAction.STARTED, "启动监听"))
     assert not storage.append_event(start)
-    rows = storage.journal_path.read_text(encoding="utf-8").splitlines()
-    latest = json.loads(rows[-1])
+    import sqlite3
+    with closing(sqlite3.connect(storage.database_path)) as connection, connection:
+        latest = json.loads(connection.execute("SELECT payload FROM journal_entries ORDER BY id DESC LIMIT 1").fetchone()[0])
     assert latest["schema_version"] == 1 and latest["kind"] == "lifecycle"
-    with storage.journal_path.open("a", encoding="utf-8") as journal:
-        journal.write(json.dumps({**latest, "schema_version": 2}) + "\n")
+    with closing(sqlite3.connect(storage.database_path)) as connection, connection:
+        connection.execute("INSERT INTO journal_entries(stream, time, protocol, endpoint, payload, size_bytes) VALUES (?, ?, ?, ?, ?, ?)",
+                           ("s7", now.isoformat(), "s7", "", json.dumps({**latest, "schema_version": 2}), 100))
     assert storage.recent_events() == (start, ServerEvent("s7", "", now, request))
     assert not ServerStorage(tmp_path).plan_path.exists()
     assert not ServerStorage(tmp_path).journal_path.exists()

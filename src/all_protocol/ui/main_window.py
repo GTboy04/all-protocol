@@ -26,6 +26,7 @@ from ..project import validate_profile
 from ..storage import ConnectionProfile, LocalHistory, ProfileFields, VISIBLE_LOG_ROWS
 from .io_bridge import IoBridge
 from .widgets import add_field
+from .journal_view import JournalView
 from .bit_inspector import BitReading, show_bit_inspector
 
 
@@ -79,7 +80,7 @@ class Rows[T](QAbstractTableModel):
     def data(self, index, role):
         if not index.isValid():
             return None
-        if role == Qt.ItemDataRole.DisplayRole:
+        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole):
             return self.format_row(self.items[index.row()])[index.column()]
         if role == Qt.ItemDataRole.TextAlignmentRole and index.column() in self.right_aligned:
             return Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
@@ -238,7 +239,6 @@ class MainWindow(QMainWindow):
         self.detail.setObjectName("packetDetail")
         self.detail.setAccessibleName("TX / RX 报文详情")
         self.detail.setReadOnly(True)
-        self.detail.setFixedHeight(80)
         self.detail.setPlaceholderText("选择一条日志查看详情和 TX/RX 字节")
 
         self.results = Rows[Point](
@@ -506,16 +506,13 @@ class MainWindow(QMainWindow):
             journal_layout.addWidget(_heading("请求日志"))
         diagnostics = QPushButton("请求诊断…")
         diagnostics.clicked.connect(self._open_diagnostics)
-        journal_actions = QHBoxLayout()
-        journal_actions.addWidget(diagnostics)
         self.verify_selected = QPushButton("核对所选写入")
         self.verify_selected.setToolTip("读取所选写入记录的原目标")
         self.verify_selected.clicked.connect(self._verify_selected_write)
-        journal_actions.addWidget(self.verify_selected)
-        journal_actions.addStretch()
-        journal_layout.addLayout(journal_actions)
-        journal_layout.addWidget(self.log_table)
-        journal_layout.addWidget(self.detail)
+        self.journal_view = JournalView(self.log_table, self.detail, "客户端 · 请求日志与报文")
+        self.journal_view.actions.insertWidget(0, diagnostics)
+        self.journal_view.actions.insertWidget(1, self.verify_selected)
+        journal_layout.addWidget(self.journal_view, 1)
         if self._embedded:
             body.addWidget(content, 1)
         else:

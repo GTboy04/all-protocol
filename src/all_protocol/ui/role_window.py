@@ -286,7 +286,7 @@ class RoleWindow(QWidget):
     def _open_project(self):
         if not self._can_switch():
             return
-        path, _ = QFileDialog.getOpenFileName(self, "打开项目", "", "AllProtocol 项目 (*.allprotocol.json);;JSON (*.json)")
+        path, _ = QFileDialog.getOpenFileName(self, "打开项目", "", "AllProtocol 项目 (*.allprotocol);;旧版 JSON 项目 (*.allprotocol.json *.json)")
         if not path:
             return
         file = ProjectFile()
@@ -337,13 +337,13 @@ class RoleWindow(QWidget):
         path = None if save_as else self.workspace.file.path
         if path is None:
             selected, _ = QFileDialog.getSaveFileName(self.project_window or self, "保存项目",
-                                                     self.workspace.project.name + ".allprotocol.json",
-                                                     "AllProtocol 项目 (*.allprotocol.json)")
+                                                     self.workspace.project.name + ".allprotocol",
+                                                     "AllProtocol 项目 (*.allprotocol)")
             if not selected:
                 return False
             path = Path(selected)
-            if not path.name.lower().endswith(".json"):
-                path = path.with_name(path.name + ".allprotocol.json")
+            if not path.name.lower().endswith(".allprotocol"):
+                path = path.with_name(path.name + ".allprotocol")
                 if path.exists() and QMessageBox.question(
                     self, "替换项目文件", f"文件已存在，是否替换？\n{path}",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,

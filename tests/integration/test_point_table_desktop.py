@@ -376,7 +376,7 @@ def test_expired_samples_and_settings_persist_without_model_reset(client, tmp_pa
     ProjectFile().save(workspace.project, path)
     restored = ProjectFile().open(path).point_tables[0]
     assert (restored.interval_ms, restored.stale_after_ms) == (250, 600)
-    assert "raw_value" not in path.read_text(encoding="utf-8")
+    assert b"raw_value" not in path.read_bytes()
 
 
 def test_queue_full_and_rejection_are_visible_without_losing_configuration(client):

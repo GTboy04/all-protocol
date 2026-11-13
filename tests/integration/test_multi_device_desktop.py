@@ -223,7 +223,7 @@ def test_remove_running_device_waits_for_cleanup_and_does_not_stop_other_device(
 
     QTimer.singleShot(0, confirm)
     window.delete_recent_button.click()
-    path = tmp_path / "project.json"
+    path = tmp_path / "project.allprotocol"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(path), ""))
     assert not home._save_project() and "清理" in errors[-1]
     wait_for(lambda: len(workspace.project.devices) == 1)

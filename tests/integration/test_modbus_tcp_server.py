@@ -150,6 +150,7 @@ def test_server_plan_validation_and_storage(tmp_path, monkeypatch):
         ServerPlan().validate(starting=True)
     storage.save_plan(plan)
     assert storage.load_plan() == plan
+    storage.database_path.unlink()
     storage.plan_path.write_bytes(b"invalid")
     with pytest.raises(ValueError):
         storage.load_plan()
@@ -165,7 +166,7 @@ def test_server_plan_validation_and_storage(tmp_path, monkeypatch):
     event = ServerEvent("modbus-tcp", "127.0.0.1:1502", now, request)
     assert not storage.append_event(event)
     assert storage.recent_events() == (event, ServerEvent("modbus-tcp", "", now, request))
-    monkeypatch.setattr("all_protocol.storage.LOG_LIMIT_BYTES", storage.journal_path.stat().st_size + 1)
+    monkeypatch.setattr("all_protocol.storage.LOG_LIMIT_BYTES", 600)
     latest = replace(event, payload=replace(request, rx=b"r2", tx=b"t2"))
     assert storage.append_event(latest)
     assert storage.recent_events() == (latest,)

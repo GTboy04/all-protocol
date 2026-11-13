@@ -1,6 +1,7 @@
 from copy import deepcopy
 from dataclasses import replace
 import json
+from all_protocol.database import decode_project_database
 
 import pytest
 
@@ -105,7 +106,7 @@ def test_project_v1_migrates_in_memory_and_writes_current_version_on_save(tmp_pa
     table = replace(example("modbus-tcp"), device_id=migrated.devices[0].id)
     project = migrated.with_table(table)
     file.save(project, path)
-    assert json.loads(path.read_bytes())["schema_version"] == 3
+    assert decode_project_database(path.read_bytes())["schema_version"] == 3
     assert ProjectFile().open(path) == project
 
 
@@ -157,7 +158,7 @@ def test_v2_project_migrates_poll_settings_without_touching_source_until_save(tm
     assert migrated.point_tables[0].interval_ms == 1000 and migrated.point_tables[0].stale_after_ms == 3000
     changed = migrated.with_table(replace(migrated.point_tables[0], interval_ms=250, stale_after_ms=1500))
     file.save(changed, path)
-    assert json.loads(path.read_bytes())["schema_version"] == 3
+    assert decode_project_database(path.read_bytes())["schema_version"] == 3
     assert ProjectFile().open(path) == changed
 
 

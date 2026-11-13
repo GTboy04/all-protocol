@@ -1,6 +1,9 @@
+from contextlib import closing
 from copy import deepcopy
 from dataclasses import replace
 import json
+import sqlite3
+from all_protocol.database import decode_project_database, DATABASE_NAME
 
 import pytest
 
@@ -51,9 +54,11 @@ def test_project_round_trip_is_portable_and_keeps_stable_ids(tmp_path):
     assert updated.devices[0].id == original.devices[1].id
     assert updated.devices[0].profile.interval_ms == 900
     assert original.devices[1].profile.interval_ms == 750
-    record = json.loads(path.read_bytes())
+    record = decode_project_database(path.read_bytes())
     assert set(record) == {"format", "schema_version", "name", "devices", "servers", "point_tables"}
-    assert "packets" not in path.read_text(encoding="utf-8")
+    assert path.read_bytes().startswith(b"SQLite format 3")
+    with closing(sqlite3.connect(path)) as connection, connection:
+        assert connection.execute("SELECT count(*) FROM journal_entries").fetchone()[0] == 0
 
 
 def test_optional_layout_round_trips_and_damaged_layout_leaves_protocol_configuration_usable(tmp_path):
@@ -62,7 +67,7 @@ def test_optional_layout_round_trips_and_damaged_layout_leaves_protocol_configur
     path = tmp_path / "layout.json"
     ProjectFile().save(replace(project, layout=layout), path)
     assert ProjectFile().open(path) == replace(project, layout=layout)
-    record = json.loads(path.read_bytes())
+    record = decode_project_database(path.read_bytes())
     assert record["schema_version"] == 3 and record["workspace_layout"]["version"] == 1
     for field, value in (("version", 99), ("navigation", -1), ("journal", True),
                          ("selection", ["unknown", "s7"]), ("journal_visible", 1)):
@@ -152,7 +157,7 @@ def test_import_copies_configuration_without_changing_local_files(tmp_path):
         history.remember(item.profile)
     modbus.save_plan(original.modbus)
     s7.save_plan(original.s7)
-    paths = (history.profiles_path, modbus.plan_path, s7.plan_path)
+    paths = (history.database_path,)
     before = [path.read_bytes() for path in paths]
     workspace = ProjectWorkspace.from_local("导入项目", tmp_path)
     assert tuple(item.profile for item in workspace.project.devices) == history.profiles()
@@ -204,3 +209,20 @@ def test_failed_atomic_commit_preserves_existing_project(tmp_path, monkeypatch):
         file.save(Project("修改"), path)
     assert path.read_bytes() == before
     assert file.saved.name == "原项目"
+
+
+def test_invalid_sqlite_and_foreign_database_keep_previous_project(tmp_path):
+    file = ProjectFile()
+    valid, invalid = tmp_path / "valid.allprotocol", tmp_path / "invalid.allprotocol"
+    file.save(Project("original"), valid)
+    with closing(sqlite3.connect(invalid)) as connection, connection:
+        connection.execute("CREATE TABLE unrelated(value TEXT)")
+    before = invalid.read_bytes()
+    with pytest.raises(ValueError):
+        file.open(invalid)
+    assert invalid.read_bytes() == before
+    assert file.saved.name == "original" and file.path == valid
+    invalid.write_bytes(b"SQLite format 3\x00" + b"bad" * 100)
+    with pytest.raises(ValueError):
+        file.open(invalid)
+    assert file.path == valid
