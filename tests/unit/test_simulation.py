@@ -45,6 +45,37 @@ def test_invalid_rules_are_rejected_with_point_context(rule):
         compile_rule(point(DataType.UINT16, initial=2), rule)
 
 
+@pytest.mark.parametrize(("data_type", "center", "amplitude", "bounds"), (
+    (DataType.UINT16, 0, 1, "-1 ～ 1"),
+    (DataType.UINT16, 65535, 1, "65534 ～ 65536"),
+    (DataType.INT16, -32768, 1, "-32769 ～ -32767"),
+), ids=("unsigned-lower", "unsigned-upper", "signed-lower"))
+def test_sine_range_error_explains_center_and_amplitude(data_type, center, amplitude, bounds):
+    with pytest.raises(ValueError) as error:
+        compile_rule(point(data_type), SimulationRule(RuleKind.SINE, value=center, amplitude=amplitude))
+    message = str(error.value)
+    assert "测试点" in message and str(data_type) in message
+    assert bounds in message
+    assert "中心值 ± 幅度" in message
+    assert "调整中心值或幅度" in message
+
+
+@pytest.mark.parametrize(("data_type", "center", "amplitude"), (
+    (DataType.UINT16, 1, 1),
+    (DataType.UINT16, 65534, 1),
+    (DataType.INT16, 0, 1),
+    (DataType.FLOAT32, 0, 0.5),
+    (DataType.UINT64, 2**64 - 2, 1),
+), ids=("unsigned-lower", "unsigned-upper", "signed", "float", "uint64"))
+def test_sine_extrema_remain_encodable(data_type, center, amplitude):
+    target = point(data_type)
+    sample = compile_rule(target, SimulationRule(RuleKind.SINE, value=center, amplitude=amplitude))
+    assert sample(250) == center + amplitude
+    assert sample(750) == center - amplitude
+    for elapsed in range(0, 1001, 20):
+        target.encode(sample(elapsed))
+
+
 def test_timeline_pause_takeover_release_and_reset_with_virtual_clock():
     timeline = SimulationRule(RuleKind.TIMELINE, actions=(
         Assignment(0, 1), Assignment(20, 2), Assignment(21, 3), Assignment(30, 4), Assignment(60, 5),

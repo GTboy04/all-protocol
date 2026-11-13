@@ -148,6 +148,10 @@ class RuleDialog(EditDialog):
         self.low = QLineEdit(_text(rule.low))
         self.high = QLineEdit(_text(rule.high))
         self.amplitude = QLineEdit(_text(rule.amplitude))
+        self.sine_hint = _plain_label(
+            "输出范围为中心值 ± 幅度，整个范围必须符合点位类型。"
+            "UInt16 不支持负数，例如中心值 1、幅度 1 时输出 0～2。"
+        )
         self.actions = QPlainTextEdit("\n".join(f"{item.at_ms} = {_text(item.value)}" for item in rule.actions))
         self.actions.setPlaceholderText("每行一个动作，时间严格递增（毫秒）\n例如：\n0 = 0\n500 = 1")
         self.actions.setFixedHeight(100)
@@ -158,6 +162,7 @@ class RuleDialog(EditDialog):
             ("幅度", self.amplitude), ("赋值动作", self.actions),
         ):
             self.form.addRow(caption, field)
+        self.form.addRow(self.sine_hint)
         self.kind.currentIndexChanged.connect(self._refresh)
         self._refresh()
         self.resize(440, self.sizeHint().height())
@@ -167,6 +172,7 @@ class RuleDialog(EditDialog):
 
     def _refresh(self):
         kind = self._kind()
+        self.form.setRowVisible(self.sine_hint, kind == RuleKind.SINE)
         timeline = kind == RuleKind.TIMELINE
         increment = kind == RuleKind.INCREMENT
         for field, visible in (

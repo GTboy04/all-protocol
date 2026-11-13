@@ -146,8 +146,14 @@ def _numeric_waveform(point, rule, kind, initial):
         amplitude = _number(rule.amplitude)
         if amplitude <= 0 or (not point.floating and type(amplitude) is not int):
             raise ValueError("幅度必须为正数，整数点位使用整数幅度")
-        point.encode(initial - amplitude)
-        point.encode(initial + amplitude)
+        low, high = initial - amplitude, initial + amplitude
+        try:
+            point.encode(low)
+            point.encode(high)
+        except (ValueError, OverflowError) as error:
+            raise ValueError(
+                f"正弦输出范围为 {low} ～ {high}（中心值 ± 幅度）：{error}。请调整中心值或幅度"
+            ) from error
 
         def sine(elapsed):
             factor = math.sin(math.tau * (elapsed % rule.period_ms) / rule.period_ms)
