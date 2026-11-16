@@ -99,12 +99,19 @@ class Rows[T](QAbstractTableModel):
         self.endResetModel()
 
     def prepend(self, item: T):
-        if len(self.items) == VISIBLE_LOG_ROWS:
-            self.beginRemoveRows(QModelIndex(), VISIBLE_LOG_ROWS - 1, VISIBLE_LOG_ROWS - 1)
-            self.items.pop()
+        self.prepend_many((item,))
+
+    def prepend_many(self, items):
+        items = list(items)[:VISIBLE_LOG_ROWS]
+        if not items:
+            return
+        keep = VISIBLE_LOG_ROWS - len(items)
+        if len(self.items) > keep:
+            self.beginRemoveRows(QModelIndex(), keep, len(self.items) - 1)
+            del self.items[keep:]
             self.endRemoveRows()
-        self.beginInsertRows(QModelIndex(), 0, 0)
-        self.items.insert(0, item)
+        self.beginInsertRows(QModelIndex(), 0, len(items) - 1)
+        self.items[:0] = items
         self.endInsertRows()
 
     def discard_oldest(self, item: T):
