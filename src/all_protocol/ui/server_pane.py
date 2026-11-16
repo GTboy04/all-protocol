@@ -189,6 +189,8 @@ class ServerPane(QWidget):
             self.requests.reset(self._storage.recent_events())
         except OSError as error:
             self._feedback(f"{self.feedback.text()}\n无法读取请求日志 · {error}".strip())
+        if hasattr(self.bridge, "events"):
+            self.bridge.events.connect(self._handle_events)
         self.bridge.event.connect(self._handle_event, Qt.ConnectionType.QueuedConnection)
         self._refresh()
 
@@ -236,6 +238,28 @@ class ServerPane(QWidget):
             self.state = ListenerState.STOPPING
             self.bridge.submit(session.stop())
         self._refresh()
+
+    def _handle_events(self, batch):
+        if batch.rotated:
+            self.requests.reset()
+            self.detail.clear()
+            if self._workspace_log is not None:
+                self._workspace_log.clear()
+            self._log_retention = replace(self._log_retention, rotated_at=datetime.now().astimezone(), clipped=False)
+        if batch.error:
+            self._log_retention = replace(self._log_retention, incomplete=True)
+            self._feedback(batch.error)
+        logs = []
+        for event in batch.events:
+            if isinstance(event.payload, (RequestMetadata, ServerLifecycle)):
+                logs.append(event)
+            else:
+                self._handle_event(event)
+        self.requests.prepend_many(reversed(logs))
+        if self._workspace_log is not None:
+            if batch.clipped or len(self._workspace_log) + len(logs) > VISIBLE_LOG_ROWS:
+                self._log_retention = replace(self._log_retention, clipped=True)
+            self._workspace_log.extend(logs)
 
     def _handle_event(self, event):
         payload = event.payload

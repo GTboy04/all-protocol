@@ -218,21 +218,32 @@ def _read_database_log(directory, stream, legacy_path, decode):
 
 
 def _append_database_log(directory, stream, legacy_path, decode, record):
-    size = len(_json_bytes(record))
-    if size > LOG_LIMIT_BYTES:
+    return _append_database_logs(directory, stream, legacy_path, decode, (record,))[0]
+
+
+def _append_database_logs(directory, stream, legacy_path, decode, records):
+    sizes = [len(_json_bytes(record)) for record in records]
+    if any(size > LOG_LIMIT_BYTES for size in sizes):
         raise OSError("单条日志超过 5 MB")
+    if not records:
+        return ()
     with connect(directory / DATABASE_NAME) as connection:
         _migrate_journal(connection, stream, legacy_path, decode)
         total = connection.execute(
             "SELECT coalesce(sum(size_bytes), 0) FROM journal_entries WHERE stream=?", (stream,)
         ).fetchone()[0]
-        rotated = total + size > LOG_LIMIT_BYTES
-        if rotated:
-            connection.execute("DELETE FROM journal_entries WHERE stream=?", (stream,))
-            connection.execute("UPDATE journal_state SET rotated_at=?, incomplete=0 WHERE stream=?",
-                               (datetime.now().astimezone().isoformat(), stream))
-        _insert_journal(connection, stream, record)
-        return rotated
+        rotations = []
+        for record, size in zip(records, sizes):
+            rotated = total + size > LOG_LIMIT_BYTES
+            if rotated:
+                connection.execute("DELETE FROM journal_entries WHERE stream=?", (stream,))
+                connection.execute("UPDATE journal_state SET rotated_at=?, incomplete=0 WHERE stream=?",
+                                   (datetime.now().astimezone().isoformat(), stream))
+                total = 0
+            _insert_journal(connection, stream, record)
+            total += size
+            rotations.append(rotated)
+        return tuple(rotations)
 
 
 class LocalHistory:
@@ -382,6 +393,14 @@ class _ServerJournal:
         return _read_database_log(self.directory, self._journal_protocol, self.journal_path, self._decode_event)
 
     def append_event(self, event: ServerEvent) -> bool:
+        return self.append_events((event,))[0]
+
+    def append_events(self, events):
+        records = tuple(self._event_record(event) for event in events)
+        return _append_database_logs(self.directory, self._journal_protocol, self.journal_path,
+                                     self._decode_event, records)
+
+    def _event_record(self, event):
         if event.protocol != self._journal_protocol:
             raise ValueError("Server event belongs to a different protocol")
         record = {"schema_version": 1, "protocol": event.protocol, "endpoint": event.endpoint,
@@ -395,7 +414,7 @@ class _ServerJournal:
             record.update(kind="lifecycle", action=payload.action, result=payload.result)
         else:
             raise ValueError("Only request and lifecycle events can be stored")
-        return _append_database_log(self.directory, self._journal_protocol, self.journal_path, self._decode_event, record)
+        return record
 
 
 def _point_record(point) -> dict:

@@ -405,3 +405,6 @@ class ProjectServerStorage:
 
     def append_event(self, event):
         return self.local.append_event(event)
+
+    def append_events(self, events):
+        return self.local.append_events(events)

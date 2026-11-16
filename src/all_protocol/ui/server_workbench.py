@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QMainWi
 from ..application.server_contracts import ListenerState, ServerRegistration
 from ..application.server_session import ServerSession
 from .io_bridge import IoBridge
+from .server_io_bridge import ServerIoBridge
 from .style import status_color
 
 
@@ -90,7 +91,7 @@ class ServerWorkbench(QMainWindow):
     def _add(self, protocol, storage):
         registration = protocol.registration
         create_session = partial(ServerSession, registration=registration)
-        bridge = IoBridge(create_session, ServerSession.stop)
+        bridge = ServerIoBridge(create_session, ServerSession.stop, storage)
         try:
             pane = protocol.create_pane(bridge, storage)
         except Exception:

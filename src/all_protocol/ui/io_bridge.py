@@ -16,11 +16,17 @@ class IoBridge(QObject):
     def __init__(self, create_session=Session, close_session=Session.disconnect):
         super().__init__()
         self._loop = asyncio.new_event_loop()
-        self.session = create_session(self.event.emit)
+        self.session = create_session(self._emit)
         self._close_session = close_session
         self._stopping = False
         self._thread = Thread(target=self._run, name="protocol-io")
         self._thread.start()
+
+    def _emit(self, event):
+        self.event.emit(event)
+
+    def _cleanup(self):
+        pass
 
     def _run(self):
         asyncio.set_event_loop(self._loop)
@@ -34,6 +40,7 @@ class IoBridge(QObject):
             self._loop.run_until_complete(self._loop.shutdown_asyncgens())
         finally:
             self._loop.close()
+            self._cleanup()
             self.stopped.emit()
 
     def submit(self, operation: Coroutine):
