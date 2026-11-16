@@ -8,6 +8,7 @@ _FORMATS = {
     "Byte": "B", "UInt16": "H", "Int16": "h", "Word": "H", "Int": "h",
     "UInt32": "I", "Int32": "i", "DWord": "I", "DInt": "i",
     "UInt64": "Q", "Int64": "q", "Float32": "f", "Real": "f", "Float64": "d",
+    "SByte": "b", "Float": "f", "Double": "d",
 }
 
 
@@ -40,7 +41,7 @@ def bit_pattern(value, kind=""):
     """Preserve signed two's complement and typed IEEE-754 widths; never guess floats."""
     if value is None:
         return None
-    if kind == "Bool" or type(value) is bool:
+    if kind in ("Bool", "Boolean") or type(value) is bool:
         return BitPattern(int(value), 1, "Bool") if value in (0, 1) else None
     code = _FORMATS.get(str(kind))
     if code is None:

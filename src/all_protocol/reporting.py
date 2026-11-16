@@ -55,6 +55,7 @@ class PointSummary:
     unit: str
     scale: float
     offset: float
+    description: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +74,8 @@ class ServerSummary:
     endpoint: str
     points: int
     scenario_points: int
+    id: str = ""
+    name: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,20 +94,23 @@ class ReportSnapshot:
     def capture(cls, project, scope, client_log, server_logs, workspace_opened_at, frozen_at):
         if frozen_at.utcoffset() is None or scope.end > frozen_at:
             raise ValueError("结束时间不能晚于冻结时间")
-        devices = tuple(DeviceSummary(device.id, device.name, device.profile.protocol, device.profile.endpoint,
+        devices = tuple(DeviceSummary(device.id, device.name, device.profile.protocol, _device_endpoint(device.profile),
                                       device.profile.fields["timeout_ms"], device.profile.interval_ms)
                         for device in project.devices) if scope.clients else ()
         tables = tuple(TableSummary(table.id, table.name, table.device_id, table.interval_ms, table.stale_after_ms,
                                     tuple(PointSummary(point.id, point.name, point.target.label, point.unit,
-                                                       point.scale, point.offset) for point in table.points))
+                                                       point.scale, point.offset, point.description) for point in table.points))
                        for table in project.point_tables) if scope.clients else ()
         plans = ()
         if scope.servers:
-            modbus_points = tuple(point for station in project.modbus.stations for point in station.points)
-            plans = tuple(ServerSummary(protocol, _endpoint(plan.host, plan.port), len(points),
-                                        sum(point.simulation is not None for point in points))
-                          for protocol, plan, points in (("modbus-tcp", project.modbus, modbus_points),
-                                                          ("s7", project.s7, project.s7.points)))
+            from .project import project_simulators
+            plans = tuple(ServerSummary(protocol, (f"{plan.endpoint} · {plan.baudrate}/8{plan.parity}{plan.stopbits}"
+                                                   if protocol == "modbus-rtu" else plan.endpoint if protocol == "opcua" else _endpoint(plan.host, plan.port)), len(points),
+                                        sum(point.simulation is not None for point in points), item.id, item.name)
+                          for item in project_simulators(project)
+                          for protocol, plan in ((item.protocol, item.plan),)
+                          for points in (tuple(p for station in plan.stations for p in station.points)
+                                         if hasattr(plan, "stations") else plan.points,))
         return cls(project.name, frozen_at, workspace_opened_at, scope, devices, tables, plans,
                    client_log if scope.clients else RetainedLog(), tuple(server_logs) if scope.servers else ())
 
@@ -187,9 +193,13 @@ def _record(entry, row, stream, zone, *, packets, device=None):
         "detail": "", "fault": "", "write": None, "verification": None, "server_details": None,
     }
     if isinstance(entry, JournalEntry):
+        if entry.value_metadata:
+            record["value_metadata"] = [{**asdict(item), "source_timestamp": _iso(item.source_timestamp, zone) if item.source_timestamp else None,
+                                         "server_timestamp": _iso(item.server_timestamp, zone) if item.server_timestamp else None}
+                                        for item in entry.value_metadata]
         record.update(session_id=entry.session_id, request_id=entry.request_id, operation_id=entry.operation_id,
                       generation=entry.generation, outcome=_redact(entry.outcome),
-                      detail=_redact(entry.detail), kind="verification" if entry.verification else
+                      detail=_redact(entry.detail), kind="notification" if entry.function == "DataChangeNotification" else "verification" if entry.verification else
                       "connection" if entry.operation in ("连接", "断开") else "request")
         if entry.write is not None:
             write = entry.write
@@ -297,7 +307,7 @@ def _row(*cells):
 
 
 def _source_name(source):
-    return {"client": "客户端", "modbus-tcp": "Modbus TCP 服务端", "s7": "S7 服务端"}.get(source, source)
+    return {"client": "客户端", "modbus-tcp": "Modbus TCP 服务端", "s7": "S7 服务端", "modbus-rtu": "Modbus RTU 服务端", "opcua": "OPC UA 服务端"}.get(source, source)
 
 
 def _record_row(record):
@@ -398,11 +408,11 @@ def _pages(snapshot, records, coverage, stats, cancel):
     add_pages("点表", ("点表", "设备 ID", "点数", "轮询 ms", "过期 ms"),
               [_row(table.name, table.device_id, len(table.points), table.interval_ms, table.stale_after_ms)
                for table in snapshot.tables])
-    add_pages("点位地址", ("点表", "点位", "目标", "单位", "倍率", "偏置"),
-              [_row(table.name, point.name, point.target, point.unit, point.scale, point.offset)
+    add_pages("点位地址", ("点表", "点位", "目标", "单位", "倍率", "偏置", "功能描述"),
+              [_row(table.name, point.name, point.target, point.unit, point.scale, point.offset, point.description)
                for table in snapshot.tables for point in table.points])
     add_pages("项目已应用的监听配置", ("协议", "端点", "点数", "场景点数"),
-              [_row(plan.protocol, plan.endpoint, plan.points, plan.scenario_points) for plan in snapshot.server_plans])
+              [_row(f"{plan.name} ({plan.protocol})" if plan.name else plan.protocol, plan.endpoint, plan.points, plan.scenario_points) for plan in snapshot.server_plans])
     rows = []
     for record in records:
         cancel.check()
@@ -460,3 +470,12 @@ def export_report(bundle: ReportBundle, path: Path, cancel: ReportCancellation):
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def _device_endpoint(profile):
+    if profile.protocol == "opcua":
+        return f"{profile.endpoint} · {profile.fields['security']} · 匿名会话"
+    if profile.protocol == "modbus-rtu":
+        fields = profile.fields
+        return f"{profile.endpoint} · {fields['baudrate']}/8{fields['parity']}{fields['stopbits']}"
+    return profile.endpoint

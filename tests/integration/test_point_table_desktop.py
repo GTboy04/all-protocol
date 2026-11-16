@@ -10,13 +10,17 @@ from PySide6.QtWidgets import QApplication, QDialogButtonBox, QFileDialog, QInpu
 from all_protocol.adapters.modbus_tcp.model import Area, ModbusTarget
 from all_protocol.adapters.s7.model import Area as S7Area, DataType as S7Type, S7Target
 from all_protocol.application.contracts import ClientError, ConnectionState, ErrorKind, OperationRejected, Point, ProtocolRegistration
-from all_protocol.point_tables import PointDefinition, PointTable, export_points_csv, export_table_json, new_id
+from all_protocol.point_tables import PointDefinition, PointTable, export_points_csv, export_table_json, import_points_csv, import_table_json, new_id
 from all_protocol.project import Project, ProjectFile, ProjectHistory, ProjectWorkspace
 from all_protocol.storage import ConnectionProfile, LocalHistory
 from all_protocol.ui.io_bridge import IoBridge
 from all_protocol.ui.main_window import DesktopProtocol, MainWindow
 from all_protocol.ui.modbus_tcp_form import ModbusTcpForm
 from all_protocol.ui.s7_form import S7Form
+from all_protocol.bit_definitions import BitDefinition
+from all_protocol.ui.bit_definitions_editor import BitDefinitionsEditor
+from all_protocol.ui.widgets import EditDialog
+from PySide6.QtWidgets import QTableWidget
 
 
 def wait_for(condition):
@@ -109,6 +113,52 @@ def test_table_management_and_project_round_trip(client, monkeypatch, tmp_path):
     assert ProjectFile().open(path) == workspace.project
 
 
+def test_drag_point_order_round_trips_project_and_export(client, tmp_path):
+    _app, window, workspace, _writes, protocol = client
+    pane = window.point_table_pane
+    table = pane.table
+    points = table.points
+    header = pane.point_table.verticalHeader()
+    assert header.sectionsMovable() and not header.isHidden()
+    header.moveSection(0, 2)
+    expected = (points[1], points[2], points[0])
+    assert pane.table.points == expected
+    assert pane.point is points[0]
+    assert [header.visualIndex(row) for row in range(3)] == [0, 1, 2]
+    path = tmp_path / "reordered.allprotocol"
+    ProjectFile().save(workspace.project, path)
+    saved = ProjectFile().open(path)
+    assert next(item for item in saved.point_tables if item.id == table.id).points == expected
+    imported = import_table_json(export_table_json(pane.table, protocol), protocol, table.device_id)
+    assert [point.name for point in imported.points] == [point.name for point in expected]
+    pane.tables.setCurrentIndex(1)
+    pane.tables.setCurrentIndex(0)
+    assert pane.rows.items == list(expected)
+    header.moveSection(2, 0)
+    assert pane.table.points == points
+
+
+@pytest.mark.parametrize("mode", ("search", "polling", "subscription", "manual", "recovery"))
+def test_drag_point_order_blocked_during_search_or_acquisition(client, mode):
+    _app, window, _workspace, _writes, _protocol = client
+    pane = window.point_table_pane
+    table = pane.table
+    if mode == "search":
+        pane.search.setText(table.points[0].name)
+    else:
+        field = {"polling": "polling_groups", "subscription": "subscription_groups",
+                 "manual": "manual_tables", "recovery": "recovering_tables"}[mode]
+        pane.refresh(replace(pane.state, **{field: (table.id,)}))
+    header = pane.point_table.verticalHeader()
+    assert not header.sectionsMovable()
+    header.moveSection(0, 2)
+    assert pane.table == table
+    assert header.visualIndex(0) == 0
+    pane.search.clear()
+    pane.refresh(window._state)
+    assert header.sectionsMovable()
+
+
 def test_point_write_previews_engineering_value_and_displays_separate_readback(client):
     app, window, _workspace, writes, _protocol = client
     pane = window.point_table_pane
@@ -198,6 +248,41 @@ def test_edit_point_and_bulk_preview_are_atomic(client):
     pane.actions["批量编辑…"].click()
     assert all(point.unit == "kPa" for point in pane.table.points)
     assert {point.id for point in pane.table.points} == {point.id for point in before.point_tables[0].points}
+
+
+def test_point_bit_definitions_edit_cancel_and_project_round_trip(client, monkeypatch, tmp_path):
+    _app, window, workspace, _writes, _protocol = client
+    pane = window.point_table_pane
+    pane.point_table.selectRow(0)
+    before = workspace.project
+    cancel_parent = True
+
+    def edit(dialog):
+        rows = dialog.findChild(QTableWidget)
+        if rows is not None:
+            rows.item(0, 1).setText("运行")
+            rows.item(0, 2).setText("停止")
+            rows.item(0, 3).setText("运行")
+            dialog.accept()
+        else:
+            dialog.findChild(BitDefinitionsEditor).click()
+            dialog.reject() if cancel_parent else dialog.accept()
+        assert not dialog.error.text()
+        return dialog.result()
+
+    monkeypatch.setattr(EditDialog, "exec", edit)
+    pane.actions["编辑点位"].click()
+    assert workspace.project == before
+    cancel_parent = False
+    pane.actions["编辑点位"].click()
+    expected = (BitDefinition(0, "运行", "停止", "运行"),)
+    assert pane.table.points[0].bit_definitions == expected
+    pane.point_table.selectRow(0)
+    assert pane._bit_reading().definitions == expected
+    assert pane._bit_reading().pattern is None
+    path = tmp_path / "point-bits.allprotocol"
+    ProjectFile().save(workspace.project, path)
+    assert ProjectFile().open(path) == workspace.project
 
 
 def test_import_cancel_bad_csv_and_success_and_export(client, monkeypatch, tmp_path):
@@ -393,3 +478,97 @@ def test_queue_full_and_rejection_are_visible_without_losing_configuration(clien
     assert "未发送" in window.statusBar().currentMessage() and "未发送" in pane.feedback.text()
     window._handle_event(state)
     assert window.read_button.isEnabled() and workspace.project == before
+
+
+def test_multiline_function_description_edit_display_and_portable_round_trip(client, tmp_path):
+    app, window, workspace, _writes, protocol = client
+    pane = window.point_table_pane
+    pane.point_table.selectRow(0)
+    original = pane.point
+    description = '用途：出口温度监测\n取值含义：0=停止, 1="运行"\n注意事项：<确认停机>后操作'
+
+    def edit():
+        dialog = app.activeModalWidget()
+        dialog.description.setPlainText(description)
+        dialog.findChild(QDialogButtonBox).button(QDialogButtonBox.StandardButton.Ok).click()
+
+    QTimer.singleShot(0, edit)
+    pane.actions["编辑点位"].click()
+    assert pane.table.points[0].id == original.id
+    assert pane.table.points[0].description == description
+    pane.point_table.selectRow(0)
+    assert description in pane.point_description.toPlainText()
+    assert pane.rows.data(pane.rows.index(0, 8), Qt.ItemDataRole.ToolTipRole) == description
+    path = tmp_path / "descriptions.allprotocol"
+    ProjectFile().save(workspace.project, path)
+    assert ProjectFile().open(path).point_tables[0].points[0].description == description
+    assert import_points_csv(export_points_csv(pane.table.points), protocol)[0].description == description
+    assert import_table_json(export_table_json(pane.table, protocol), protocol, "other").points[0].description == description
+
+
+def test_search_filters_without_reordering_and_locates_point_in_another_table(client):
+    _app, window, workspace, _writes, _protocol = client
+    pane = window.point_table_pane
+    first, second = workspace.project.point_tables
+    described = replace(first.points[2], description="用途：排风机运行反馈\n0=停止，1=运行")
+    other = replace(first.points[0], id=new_id(), name="风机启停命令", description="写入前先检查排风机联锁")
+    workspace.project = workspace.project.with_table(replace(first, points=first.points[:2] + (described,))).with_table(
+        replace(second, points=(other,)))
+    window._refresh()
+    pane.point_table.selectRow(0)
+    pane.search.setText("排风机")
+    assert pane.search_results.count() == 2
+    assert [pane.point_table.isRowHidden(row) for row in range(3)] == [True, True, False]
+    assert pane.point is None and not pane.actions["写入点位…"].isEnabled()
+    pane.point_table.selectRow(2)
+    assert pane.point.id == described.id and "排风机运行反馈" in pane.point_description.toPlainText()
+    assert pane.rows.items[2].id == described.id
+    index = next(index for index in range(pane.search_results.count())
+                 if pane.search_results.itemData(index) == (second.id, other.id))
+    pane._locate_point(index)
+    assert pane.table.id == second.id and pane.point.id == other.id
+    pane.search.setText("不存在的点位")
+    assert pane.search_results.count() == 0 and pane.point is None
+    assert pane.point_description.toPlainText() == ""
+    pane.search.clear()
+    assert not pane.point_table.isRowHidden(0)
+    pane.search.setText(other.target.label.lower() + " 联锁")
+    assert pane.search_results.count() == 1
+    assert not pane.point_table.isRowHidden(0)
+
+
+def test_recovery_dialog_saves_per_device_and_stop_retry_is_available(client):
+    app, window, workspace, _writes, _protocol = client
+    from all_protocol.application.recovery import RecoveryPolicy
+    pane = window.point_table_pane
+
+    def configure():
+        dialog = app.activeModalWidget()
+        assert not dialog.enabled.isChecked() and not dialog.restore.isChecked()
+        dialog.enabled.setChecked(True)
+        dialog.restore.setChecked(True)
+        dialog.interval.setValue(200)
+        dialog.maximum.setValue(200)
+        dialog.attempts.setValue(3)
+        dialog.accept()
+
+    QTimer.singleShot(0, configure)
+    window.recovery_button.click()
+    device = next(device for device in workspace.project.devices if device.profile.protocol == _protocol)
+    assert RecoveryPolicy.from_fields(device.profile.fields) == RecoveryPolicy(True, 200, 200, 3, True)
+    window.connection_button.click()
+    wait_for(window.read_button.isEnabled)
+    pane.poll_button.click()
+    wait_for(lambda: bool(window._state.polling_groups))
+    window._bridge.submit(window._session.disconnect(unexpected=True))
+    wait_for(lambda: window._state.connection == ConnectionState.WAITING)
+    assert window.connection_button.text() == "停止重试" and window.connection_button.isEnabled()
+    assert not window.recovery_button.isEnabled()
+    assert "下次重试" in window.connection_status.toolTip()
+    assert pane.stop_all_button.isEnabled()
+    window.connection_button.click()
+    wait_for(lambda: window._state.connection == ConnectionState.OFFLINE)
+    generation = window._state.generation
+    QTest.qWait(250)
+    assert window._state.generation == generation
+    assert not window._state.recovering_tables

@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 
 from ..adapters.modbus_tcp.model import ModbusTarget
 from ..adapters.s7.model import DataType as S7Type
+from ..adapters.opcua.model import UaTarget, UaType
 from ..application.contracts import ClientError, Command, VerificationOptions
 from .widgets import spinbox
 
@@ -20,13 +21,17 @@ class WriteDialog(QDialog):
         self.target, self.point = target, point
         self.command = None
         modbus = isinstance(target, ModbusTarget)
+        opcua = isinstance(target, UaTarget)
         kind = target.value_type if modbus else target.data_type
-        self.floating = kind.floating if modbus else kind == S7Type.REAL
-        self.parse = kind.parse if modbus else float if self.floating else int
+        self.floating = kind.floating if modbus or opcua else kind == S7Type.REAL
+        self.parse = kind.parse if modbus or opcua else float if self.floating else int
+        self.string_value = opcua and kind == UaType.String
         self.input = QPlainTextEdit()
         self.input.setFixedHeight(62)
         self.input.setAccessibleName("写入值")
         self.input.setPlaceholderText("输入十进制值，用逗号、空格或换行分隔")
+        if self.string_value:
+            self.input.setPlaceholderText("输入一个字符串；保留空格、逗号、换行与空字符串")
         self.preview = QPlainTextEdit()
         self.preview.setAccessibleName("写入值预览")
         self.preview.setReadOnly(True)
@@ -57,6 +62,8 @@ class WriteDialog(QDialog):
         if point:
             self.mode = QComboBox()
             self.mode.addItems(("原始值", "工程值"))
+            if self.string_value:
+                self.mode.setEnabled(False)
             self.mode.currentIndexChanged.connect(self._preview)
             form.addRow("输入类型", self.mode)
             conversion = QLabel(f"原始值 × {point.scale} + {point.offset} {point.unit}".strip())
@@ -93,8 +100,8 @@ class WriteDialog(QDialog):
         self.form.setRowVisible(self.delay, checked)
 
     def _values(self):
-        text = self.input.toPlainText().strip()
-        fields = re.split(r"[,，\s]+", text) if text else ()
+        text = self.input.toPlainText()
+        fields = (text,) if self.string_value else re.split(r"[,，\s]+", text.strip()) if text.strip() else ()
         if len(fields) != self.target.count:
             raise ValueError(f"请输入 {self.target.count} 个值")
         engineering = self.mode is not None and self.mode.currentIndex() == 1

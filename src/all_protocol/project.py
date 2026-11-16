@@ -6,17 +6,23 @@ import json
 from pathlib import Path
 from uuid import uuid4
 
+from .adapters.modbus_rtu.model import ModbusRtuConfig, ModbusRtuTarget
+from .adapters.modbus_rtu.server_model import RtuServerPlan
 from .adapters.modbus_tcp.model import Area, ModbusTarget, ModbusTcpConfig, data_types
 from .adapters.modbus_tcp.server_model import ServerPlan
 from .adapters.modbus_tcp.values import DataType, RegisterOrder
 from .adapters.s7.model import Area as S7Area, DataType as S7DataType, S7Config, S7Target
 from .adapters.s7.server_model import S7ServerPlan
+from .adapters.opcua.model import OpcUaConfig
+from .adapters.opcua.server_model import UaServerPlan
 from .application.contracts import ClientError
-from .point_tables import PointTable, decode_table, table_record
+from .application.recovery import RecoveryPolicy, PREFIX as RECOVERY_PREFIX
+from .point_tables import PointTable, decode_table, table_record, decode_target
 from .database import SQLITE_HEADER, encode_project_database, decode_project_database
 from .storage import (
     ConnectionProfile, LocalHistory, ServerStorage, S7ServerStorage,
-    _load_profile, _locked, _replace_file, decode_modbus_plan, decode_s7_plan, encode_modbus_plan, encode_s7_plan,
+    RtuServerStorage, decode_rtu_plan, encode_rtu_plan, _load_profile, _locked, _replace_file, decode_modbus_plan, decode_s7_plan, encode_modbus_plan, encode_s7_plan,
+    UaServerStorage, decode_ua_plan, encode_ua_plan,
 )
 
 
@@ -25,17 +31,32 @@ PROJECT_LIMIT_BYTES = 10 * 1024 * 1024
 
 def validate_profile(profile: ConnectionProfile):
     """Validate without Qt forms, including types that numeric comparisons accept."""
-    fields = profile.fields
-    common = ("port", "timeout_ms", "offset", "count")
-    extra = ("unit_id",) if profile.protocol == "modbus-tcp" else ("rack", "slot", "db", "bit")
-    if not isinstance(fields.get("host"), str) or any(type(fields.get(key)) is not int for key in common + extra):
+    RecoveryPolicy.from_fields(profile.fields)
+    fields = {key: value for key, value in profile.fields.items() if not key.startswith(RECOVERY_PREFIX)}
+    if profile.protocol == "opcua":
+        connection_keys = {"url", "security", "identity_id", "timeout_ms"}
+        target_keys = {"namespace_uri", "identifier_type", "identifier", "data_type", "count"}
+        if set(fields) != connection_keys | target_keys:
+            raise ValueError("OPC UA 配置字段无效，项目不得含凭据或本机证书路径")
+        config = OpcUaConfig(**{key: fields[key] for key in connection_keys})
+        config.validate()
+        decode_target("opcua", {key: fields[key] for key in target_keys})
+        if config.endpoint != profile.endpoint:
+            raise ValueError("设备端点与连接字段不一致")
+        return config
+    rtu = profile.protocol == "modbus-rtu"
+    common = ("timeout_ms", "offset", "count") + (("baudrate", "stopbits") if rtu else ("port",))
+    extra = ("unit_id",) if profile.protocol in ("modbus-tcp", "modbus-rtu") else ("rack", "slot", "db", "bit")
+    if not isinstance(fields.get("serial_port" if rtu else "host"), str) or any(type(fields.get(key)) is not int for key in common + extra):
         raise ValueError("设备字段类型无效")
-    if profile.protocol == "modbus-tcp":
-        config = ModbusTcpConfig(fields["host"], fields["port"], fields["timeout_ms"])
+    if profile.protocol in ("modbus-tcp", "modbus-rtu"):
+        config = (ModbusRtuConfig(*(fields[key] for key in ("serial_port", "baudrate", "parity", "stopbits", "timeout_ms")))
+                  if rtu else ModbusTcpConfig(fields["host"], fields["port"], fields["timeout_ms"]))
         area = Area(fields["area"])
-        target = ModbusTarget(fields["unit_id"], area, fields["offset"], fields["count"],
-                              DataType(fields.get("data_type", data_types(area)[0])),
-                              RegisterOrder(fields.get("order", RegisterOrder.BIG)))
+        target_type = ModbusRtuTarget if rtu else ModbusTarget
+        target = target_type(fields["unit_id"], area, fields["offset"], fields["count"],
+                             DataType(fields.get("data_type", data_types(area)[0])),
+                             RegisterOrder(fields.get("order", RegisterOrder.BIG)))
     elif profile.protocol == "s7":
         config = S7Config(fields["host"], fields["port"], fields["rack"], fields["slot"], fields["timeout_ms"])
         target = S7Target(S7Area[fields["area"]], fields["db"], fields["offset"],
@@ -54,6 +75,27 @@ class ProjectDevice:
     id: str
     name: str
     profile: ConnectionProfile
+
+
+SERVER_FIELDS = {"modbus-tcp": "modbus", "s7": "s7", "modbus-rtu": "rtu", "opcua": "ua"}
+SERVER_NAMES = {"modbus-tcp": "Modbus TCP", "s7": "Siemens S7", "modbus-rtu": "Modbus RTU", "opcua": "OPC UA（本机模拟）"}
+SERVER_CODECS = {"modbus-tcp": (encode_modbus_plan, decode_modbus_plan), "s7": (encode_s7_plan, decode_s7_plan),
+                 "modbus-rtu": (encode_rtu_plan, decode_rtu_plan), "opcua": (encode_ua_plan, decode_ua_plan)}
+
+
+@dataclass(frozen=True)
+class ProjectSimulator:
+    id: str
+    name: str
+    protocol: str
+    plan: ServerPlan | S7ServerPlan | RtuServerPlan | UaServerPlan
+
+
+def project_simulators(project):
+    if project.simulators is not None:
+        return project.simulators
+    return tuple(ProjectSimulator(key, SERVER_NAMES[key], key, getattr(project, field))
+                 for key, field in SERVER_FIELDS.items())
 
 
 @dataclass(frozen=True)
@@ -92,6 +134,9 @@ class Project:
     s7: S7ServerPlan = field(default_factory=S7ServerPlan)
     point_tables: tuple[PointTable, ...] = ()
     layout: WorkspaceLayout | None = None
+    rtu: RtuServerPlan = field(default_factory=RtuServerPlan)
+    ua: UaServerPlan = field(default_factory=UaServerPlan)
+    simulators: tuple[ProjectSimulator, ...] | None = None
 
     def remember(self, profile: ConnectionProfile) -> "Project":
         validate_profile(profile)
@@ -114,12 +159,24 @@ class Project:
 
 
 def project_record(project: Project) -> dict:
+    ua = project.ua != UaServerPlan() or any(device.profile.protocol == "opcua" for device in project.devices)
+    recovery = any(RecoveryPolicy.from_fields(device.profile.fields) != RecoveryPolicy() for device in project.devices)
+    bits = (any(point.bit_definitions for table in project.point_tables for point in table.points)
+            or any(point.bit_definitions for station in (*project.modbus.stations, *project.rtu.stations) for point in station.points)
+            or any(point.bit_definitions for point in (*project.s7.points, *project.ua.points)))
+    ua = ua or recovery or bits or project.simulators is not None
     record = {
-        "format": "all-protocol-project", "schema_version": 3, "name": project.name,
+        "format": "all-protocol-project", "schema_version": 8 if project.simulators is not None else 7 if bits else 6 if recovery else 5 if ua else 4, "name": project.name,
         "devices": [asdict(item) for item in project.devices],
-        "servers": {"modbus-tcp": encode_modbus_plan(project.modbus), "s7": encode_s7_plan(project.s7)},
+        "servers": {"modbus-tcp": encode_modbus_plan(project.modbus), "s7": encode_s7_plan(project.s7),
+                    "modbus-rtu": encode_rtu_plan(project.rtu)},
         "point_tables": [table_record(table) for table in project.point_tables],
     }
+    if ua:
+        record["servers"]["opcua"] = encode_ua_plan(project.ua)
+    if project.simulators is not None:
+        record["simulators"] = [dict(id=item.id, name=item.name, protocol=item.protocol,
+                                     plan=SERVER_CODECS[item.protocol][0](item.plan)) for item in project.simulators]
     if project.layout is not None:
         record["workspace_layout"] = {"version": 1, **asdict(project.layout), "selection": list(project.layout.selection)}
     return record
@@ -128,7 +185,7 @@ def project_record(project: Project) -> dict:
 def decode_project(data) -> Project:
     try:
         if (not isinstance(data, dict) or data.get("format") != "all-protocol-project"
-                or type(data.get("schema_version")) is not int or data["schema_version"] not in (1, 2, 3)):
+                or type(data.get("schema_version")) is not int or data["schema_version"] not in (1, 2, 3, 4, 5, 6, 7, 8)):
             raise ValueError("项目格式或版本无法识别")
         name = data["name"]
         if not isinstance(name, str) or not name.strip() or len(name) > 200:
@@ -146,6 +203,10 @@ def decode_project(data) -> Project:
                 if profile is None:
                     raise ValueError("设备配置无效")
                 validate_profile(profile)
+                if RecoveryPolicy.from_fields(profile.fields) != RecoveryPolicy() and data["schema_version"] < 6:
+                    raise ValueError("恢复配置须使用项目 v6")
+                if profile.protocol == "opcua" and data["schema_version"] < 5:
+                    raise ValueError("OPC UA 设备须使用项目 v5")
                 if item["id"] in ids or profile.key in endpoints:
                     raise ValueError("设备 ID 或协议端点重复")
                 ids.add(item["id"])
@@ -154,8 +215,11 @@ def decode_project(data) -> Project:
             except (KeyError, TypeError, ValueError, ClientError) as error:
                 raise ValueError(f"devices[{index}]：{error}") from error
         servers = data["servers"]
-        if not isinstance(servers, dict) or set(servers) != {"modbus-tcp", "s7"}:
-            raise ValueError("servers 必须包含且仅包含 modbus-tcp 和 s7")
+        expected = {"modbus-tcp", "s7", "modbus-rtu"} if data["schema_version"] >= 4 else {"modbus-tcp", "s7"}
+        if data["schema_version"] >= 5:
+            expected.add("opcua")
+        if not isinstance(servers, dict) or set(servers) != expected:
+            raise ValueError(f"servers 必须包含且仅包含 {', '.join(sorted(expected))}")
         plans = []
         for protocol, decode in (("modbus-tcp", decode_modbus_plan), ("s7", decode_s7_plan)):
             try:
@@ -175,7 +239,7 @@ def decode_project(data) -> Project:
         for index, raw_table in enumerate(raw_tables):
             try:
                 device = devices_by_id[raw_table["device_id"]]
-                if data["schema_version"] == 3 and not {"interval_ms", "stale_after_ms"}.issubset(raw_table):
+                if data["schema_version"] >= 3 and not {"interval_ms", "stale_after_ms"}.issubset(raw_table):
                     raise ValueError("v3 点表缺少轮询周期或过期时间")
                 table = decode_table(raw_table, device.profile.protocol)
                 if table.id in table_ids or any(point.id in point_ids for point in table.points):
@@ -185,7 +249,27 @@ def decode_project(data) -> Project:
                 tables.append(table)
             except (KeyError, TypeError, ValueError) as error:
                 raise ValueError(f"point_tables[{index}]：{error}") from error
-        return Project(name, tuple(devices), *plans, tuple(tables), WorkspaceLayout.decode(data.get("workspace_layout")))
+        simulators = None
+        if data["schema_version"] >= 8:
+            raw = data["simulators"]
+            if not isinstance(raw, list) or len(raw) > 64:
+                raise ValueError("模拟设备必须是列表，最多 64 个服务")
+            simulators, seen = [], set()
+            for item in raw:
+                if (not isinstance(item, dict) or set(item) != {"id", "name", "protocol", "plan"}
+                        or any(not isinstance(item[key], str) or not item[key].strip() or len(item[key]) > 200
+                               for key in ("id", "name"))
+                        or item["id"] in seen or item["protocol"] not in SERVER_CODECS):
+                    raise ValueError("模拟设备 ID、名称或协议无效，ID 不得重复")
+                plan = SERVER_CODECS[item["protocol"]][1](item["plan"])
+                simulators.append(ProjectSimulator(item["id"], item["name"], item["protocol"], plan))
+                seen.add(item["id"])
+            simulators = tuple(simulators)
+        elif "simulators" in data:
+            raise ValueError("多个模拟设备须使用项目 v8")
+        return Project(name, tuple(devices), *plans, tuple(tables), WorkspaceLayout.decode(data.get("workspace_layout")),
+                       decode_rtu_plan(servers["modbus-rtu"]) if data["schema_version"] >= 4 else RtuServerPlan(),
+                       decode_ua_plan(servers["opcua"]) if data["schema_version"] >= 5 else UaServerPlan(), simulators)
     except (KeyError, TypeError, ClientError) as error:
         raise ValueError(f"项目字段无效：{error}") from error
 
@@ -248,7 +332,8 @@ class ProjectWorkspace:
     def from_local(cls, name: str, directory: Path) -> "ProjectWorkspace":
         history = LocalHistory(directory)
         profiles = history.profiles()
-        project = Project(name, modbus=ServerStorage(directory).load_plan(), s7=S7ServerStorage(directory).load_plan())
+        project = Project(name, modbus=ServerStorage(directory).load_plan(), s7=S7ServerStorage(directory).load_plan(),
+                          rtu=RtuServerStorage(directory).load_plan(), ua=UaServerStorage(directory).load_plan())
         for profile in reversed(profiles):
             project = project.remember(profile)
         project = decode_project(project_record(project))
@@ -292,20 +377,31 @@ class ProjectHistory:
 
 
 class ProjectServerStorage:
-    def __init__(self, workspace: ProjectWorkspace, project_field: str, local):
+    def __init__(self, workspace: ProjectWorkspace, project_field: str, local, simulator=None):
         self.workspace, self.project_field, self.local = workspace, project_field, local
         self.plan_path = "当前项目"
         self.project_mode = True
+        self.simulator_id = simulator.id if simulator else None
+        self.simulator_name = simulator.name if simulator else None
+        self.simulator_protocol = simulator.protocol if simulator else None
 
     def load_plan(self):
+        if self.simulator_id is not None:
+            return next(item.plan for item in project_simulators(self.workspace.project) if item.id == self.simulator_id)
         return getattr(self.workspace.project, self.project_field)
 
     def save_plan(self, plan):
         plan.validate()
+        if self.simulator_id is not None and self.workspace.project.simulators is not None:
+            self.workspace.project = replace(self.workspace.project, simulators=tuple(
+                replace(item, plan=plan) if item.id == self.simulator_id else item
+                for item in self.workspace.project.simulators))
+            return
         self.workspace.project = replace(self.workspace.project, **{self.project_field: plan})
 
     def recent_events(self):
-        return self.local.recent_events()
+        # A local protocol journal may contain other projects and simulator instances.
+        return ()
 
     def append_event(self, event):
         return self.local.append_event(event)

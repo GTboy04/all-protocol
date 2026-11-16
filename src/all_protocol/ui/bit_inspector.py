@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..application.binary import BitPattern
+from ..bit_definitions import BitDefinition, bit_width
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,8 @@ class BitReading:
     label: str
     pattern: BitPattern | None
     context: str = ""
+    definitions: tuple[BitDefinition, ...] = ()
+    kind: str = ""
 
 
 class BitInspector(QDialog):
@@ -49,10 +52,11 @@ class BitInspector(QDialog):
         self.bit_scroll.setWidget(grid_widget)
         layout.addWidget(self.bit_scroll)
         self.detail = QLabel(objectName="permissions")
+        self.detail.setTextFormat(Qt.TextFormat.PlainText)
         self.detail.setWordWrap(True)
         layout.addWidget(self.detail)
         explanation = QLabel("左侧为高位，bit 0 是最低位。显示解码后数值的位模式，不代表 TX/RX 字节顺序。\n"
-                             "整数负数使用补码，浮点数使用 IEEE 754。业务含义请查阅设备点表。", objectName="resultContext")
+                             "整数负数使用补码，浮点数使用 IEEE 754。可在编辑点位的「Bit 含义…」中定义业务含义。", objectName="resultContext")
         explanation.setWordWrap(True)
         layout.addWidget(explanation)
         layout.addStretch()
@@ -81,10 +85,11 @@ class BitInspector(QDialog):
         self.context.setText(reading.context if reading else "在原窗口选择结果或点位后，可在这里逐位查看。")
         self.binary.setText(f"{pattern.kind} · {pattern.width} bit · {pattern.hexadecimal}\n{pattern.binary}" if pattern
                             else "暂无可显示的位模式；请先读取数值。非有限浮点数无法从解码值还原原始位模式。")
-        width = pattern.width if pattern else 0
+        width = pattern.width if pattern else bit_width(reading.kind) if reading else 0
+        definitions = {item.bit: item for item in reading.definitions} if reading else {}
         available_height = self.screen().availableGeometry().height()
         max_grid_height = max(112, min(320, available_height - 400))
-        self.bit_scroll.setFixedHeight(min(max_grid_height, max(64, ((width + 7) // 8) * 58)))
+        self.bit_scroll.setFixedHeight(min(max_grid_height, max(90, ((width + 7) // 8) * 88)))
         if len(self.cells) != width:
             while self.cells:
                 self.cells.pop().deleteLater()
@@ -94,11 +99,18 @@ class BitInspector(QDialog):
                 self.grid.addWidget(cell, position // 8, position % 8)
                 self.cells.append(cell)
         for cell, bit in zip(self.cells, range(width - 1, -1, -1)):
-            value = pattern.bit(bit)
-            cell.setText(f"bit {bit}\n{value}")
-            cell.setAccessibleName(f"bit {bit} = {value}")
-            cell.setToolTip(f"bit {bit} = {value}；掩码 0x{1 << bit:X}")
-            cell.setProperty("bitValue", str(value))
+            value = pattern.bit(bit) if pattern else None
+            definition = definitions.get(bit)
+            name = definition.name if definition else ""
+            meaning = definition.meaning(value) if definition and value is not None else ""
+            short = lambda text: cell.fontMetrics().elidedText(text.replace("\n", " "), Qt.TextElideMode.ElideRight, 85)
+            label = f"bit {bit} · {value if value is not None else '—'}"
+            cell.setText(label + f"\n{short(name)}\n{short(meaning)}" if definition
+                         else f"bit {bit}\n{value if value is not None else '—'}")
+            cell.setAccessibleName(f"{label} {name} {meaning}".strip())
+            cell.setToolTip(f"{label}；掩码 0x{1 << bit:X}" +
+                            (f"\n{name}\n0 = {definition.zero}\n1 = {definition.one}" if definition else "\n未定义业务含义"))
+            cell.setProperty("bitValue", str(value) if value is not None else "unknown")
             cell.style().unpolish(cell)
             cell.style().polish(cell)
         self.copy.setEnabled(pattern is not None)
@@ -107,17 +119,21 @@ class BitInspector(QDialog):
     def _select(self, index):
         self.selected_bit = index
         pattern = self._last.pattern if self._last else None
+        definition = next((item for item in self._last.definitions if item.bit == index), None) if self._last else None
+        meanings = (f"\n{definition.name}\n0 = {definition.zero or '未定义'}；1 = {definition.one or '未定义'}"
+                    if definition else "\n未定义业务含义。")
         if pattern is None:
-            self.detail.setText("位查看为只读，不会修改设备。")
+            self.detail.setText(f"bit {index}：暂无采样值。{meanings}")
             return
         extra = ""
-        if pattern.kind in ("Float32", "Real", "Float64"):
+        if pattern.kind in ("Float32", "Real", "Float64", "Float", "Double"):
             mantissa = 52 if pattern.width == 64 else 23
             extra = "；符号位" if index == pattern.width - 1 else "；指数位" if index >= mantissa else "；尾数位"
         elif pattern.kind in ("Int", "DInt", "Int16", "Int32", "Int64") and index == pattern.width - 1:
             extra = "；补码符号位"
         self.detail.setText(f"bit {index} = {pattern.bit(index)}（{'置位' if pattern.bit(index) else '清零'}）"
-                            f"；掩码 0x{1 << index:X}{extra}。未定义业务含义。")
+                            f"；掩码 0x{1 << index:X}{extra}。" +
+                            (f" 当前含义：{definition.meaning(pattern.bit(index)) or '未定义'}" if definition else "") + meanings)
 
     def _copy(self):
         if self._last and self._last.pattern:

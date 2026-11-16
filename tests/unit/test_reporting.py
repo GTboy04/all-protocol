@@ -33,7 +33,8 @@ def snapshot(*, packets=False):
         ProjectDevice("s7", "工位 & 反馈", s7_profile),
     )
     target = ModbusTarget(1, Area.HR, 4, 1)
-    table = PointTable("p", "mb", "传感器表", (PointDefinition("sensor", "温度", target, "℃", .1, 2),))
+    table = PointTable("p", "mb", "传感器表", (PointDefinition("sensor", "温度", target, "℃", .1, 2,
+                                                              "用途：出口温度监测\n注意：<确认停机>"),))
     project = Project("试运行 <联调>", devices, point_tables=(table,))
     write = JournalEntry(
         9, START, "写入", "DB1", "0x05", 8, "设备已应答", packets=((True, b"\x01"), (False, b"\xFF")),
@@ -100,6 +101,8 @@ def test_report_counts_coverage_escape_and_evidence_match_across_formats(tmp_pat
     assert "工位 &amp; 反馈" in html and "点位地址" in html
     assert rows[-1]["device_name"].startswith("'\t=HYPERLINK")
     assert report["point_tables"][0]["points"][0]["scale"] == .1
+    assert report["point_tables"][0]["points"][0]["description"] == "用途：出口温度监测\n注意：<确认停机>"
+    assert "功能描述" in html and "&lt;确认停机&gt;" in html
     verification = next(item for item in report["records"] if item["verification"])["verification"]
     assert verification["expected"] == [42] and verification["observed"] == [40]
     assert verification["write_session_id"] == "s7-connection" and verification["original_row"] == 1

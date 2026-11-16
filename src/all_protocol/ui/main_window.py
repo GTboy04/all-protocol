@@ -7,15 +7,16 @@ from typing import Protocol, runtime_checkable
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, QSignalBlocker, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QFont
 from PySide6.QtWidgets import (
-    QAbstractItemView, QComboBox, QFrame, QHBoxLayout, QHeaderView, QLabel,
+    QAbstractItemView, QComboBox, QDialog, QFrame, QHBoxLayout, QHeaderView, QLabel,
     QMainWindow, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox, QSplitter,
     QStackedWidget, QTableView, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ..application.contracts import (
     BatchResult, ClientError, Command, ConnectionState, DeviceEvent, DeviceRemoved, JournalEntry, OperationRejected, Point, ProtocolRegistration,
-    ReadUpdate, SessionState, TableReadUpdate, Target, WriteStatus,
+    ReadUpdate, SessionState, TableReadUpdate, Target, WriteStatus, SubscriptionHealth,
 )
+from ..application.recovery import RecoveryPolicy
 from ..application.diagnostics import DiagnosticRow, verification_summary, write_evidence_lines
 from ..application.binary import binary_text, bit_pattern, target_kind
 from ..application.journal import LogRetention, RetainedLog
@@ -70,6 +71,8 @@ class Rows[T](QAbstractTableModel):
         return 0 if parent.isValid() else len(self.headers)
 
     def headerData(self, section, orientation, role):
+        if orientation == Qt.Orientation.Vertical and role == Qt.ItemDataRole.DisplayRole:
+            return str(section + 1)
         if orientation == Qt.Orientation.Horizontal:
             if role == Qt.ItemDataRole.DisplayRole:
                 return self.headers[section]
@@ -147,7 +150,7 @@ def _journal_row(entry: JournalEntry) -> tuple[str, ...]:
     operation = ("独立核对" if entry.verification.independent else "自动回读") if entry.verification else entry.operation
     outcome = entry.write.status if entry.write is not None and entry.write.status == WriteStatus.REJECTED else entry.outcome
     return (entry.time.strftime("%m-%d %H:%M:%S"), operation, entry.target,
-            entry.function or "—", f"{entry.elapsed_ms} ms", outcome)
+            entry.function or "—", "—" if entry.function == "DataChangeNotification" else f"{entry.elapsed_ms} ms", outcome)
 
 
 class MainWindow(QMainWindow):
@@ -188,6 +191,7 @@ class MainWindow(QMainWindow):
         self._protocols = protocols
         self._forms = tuple(item.create_form() for item in protocols)
         self._form_intervals = [1000] * len(protocols)
+        self._recovery_options = [RecoveryPolicy() for _ in protocols]
         self._state = SessionState()
         self._closing = False
         self._stopped = False
@@ -213,9 +217,17 @@ class MainWindow(QMainWindow):
             self.connection_forms.addWidget(form.connection)
             self.query_forms.addWidget(form.query)
             form.query.changed.connect(self._query_changed)
+            bind_io = getattr(form, "bind_io", None)
+            if bind_io is not None:
+                bind_io(bridge)
+            requested = getattr(form.query, "command_requested", None)
+            if requested is not None:
+                requested.connect(lambda command, source=form: self._protocol_command(source, command))
 
         self.connection_button = QPushButton("连接")
         self.connection_button.setMinimumWidth(96)
+        self.recovery_button = QPushButton("断线恢复…")
+        self.recovery_button.clicked.connect(self._edit_recovery)
         self.connection_status = QLabel()
         self.connection_status.setObjectName("connectionStatus")
         self.read_button = QPushButton("读取")
@@ -242,7 +254,7 @@ class MainWindow(QMainWindow):
         self.detail.setPlaceholderText("选择一条日志查看详情和 TX/RX 字节")
 
         self.results = Rows[Point](
-            ("地址", "点位", "值", "十六进制", "二进制"), self._result_row,
+            ("地址", "点位", "值", "十六进制", "二进制", "协议状态 / 时间戳"), self._result_row,
             (2, 3), (3, 4),
         )
         self.journal = Rows[JournalEntry](
@@ -258,7 +270,11 @@ class MainWindow(QMainWindow):
         self._build()
         if self._project_mode:
             for form in self._forms:
-                form.connection.host.textChanged.connect(self._refresh)
+                host = getattr(form.connection, "host", None)
+                if host is not None:
+                    host.textChanged.connect(self._refresh)
+                for field in form.connection.findChildren(QComboBox):
+                    field.currentTextChanged.connect(self._refresh)
                 for field in form.connection.findChildren(QSpinBox):
                     field.valueChanged.connect(self._refresh)
 
@@ -408,6 +424,7 @@ class MainWindow(QMainWindow):
             connection_header.addWidget(self.recent_connections)
             connection_header.addWidget(self.delete_recent_button)
         connection_layout.addLayout(connection_header)
+        connection_header.addWidget(self.recovery_button)
         settings = QHBoxLayout()
         settings.setSpacing(8)
         add_field(settings, "协议", self.protocol)
@@ -494,7 +511,7 @@ class MainWindow(QMainWindow):
                 self._history.workspace, self._table_device,
                 lambda: self._protocols[self.protocol.currentIndex()].create_form,
                 self._save_table_device, self._read_table, self._write_point, lambda: self._registration.writable,
-                self._poll_table, self._stop_all_polling, embedded=self._embedded,
+                self._poll_table, self._stop_all_polling, subscribe_table=self._subscribe_table, embedded=self._embedded,
             )
             self.point_views = QTabWidget()
             self.point_views.setAccessibleName("点位视图")
@@ -527,7 +544,8 @@ class MainWindow(QMainWindow):
 
     def _result_row(self, point):
         kind = target_kind(self._last_read.command.target) if self._last_read else ""
-        return point.address, point.label, str(point.value), point.hex_value, binary_text(point.value, kind)
+        return (point.address, point.label, str(point.value), point.hex_value, binary_text(point.value, kind),
+                point.metadata.summary if point.metadata else "—")
 
     def _bit_reading(self):
         index = self.result_table.currentIndex()
@@ -601,6 +619,7 @@ class MainWindow(QMainWindow):
         self.recent_connections.setCurrentIndex(index)
         protocol_index = self.protocol.findData(profile.protocol)
         form = self._forms[protocol_index]
+        self._recovery_options[protocol_index] = RecoveryPolicy.from_fields(profile.fields)
         try:
             with QSignalBlocker(form.query):
                 form.restore_profile(profile.fields)
@@ -666,7 +685,7 @@ class MainWindow(QMainWindow):
         self._show_profiles(profiles)
         if self._project_mode:
             # Do not silently add the removed device again on the next project save.
-            self._forms[self.protocol.findData(profile.protocol)].connection.host.clear()
+            _clear_connection(self._forms[self.protocol.findData(profile.protocol)])
         self._refresh()
 
     def _remember_connection(self, endpoint: str):
@@ -674,7 +693,7 @@ class MainWindow(QMainWindow):
         if self._history is None or not isinstance(form, ProfileForm):
             return True
         try:
-            profile = ConnectionProfile(self._registration.key, endpoint, form.profile_fields(), self.interval.value())
+            profile = ConnectionProfile(self._registration.key, endpoint, self._profile_fields(), self.interval.value())
             self._validate_runtime_config(profile)
             profiles = self._history.remember(profile)
         except OSError:
@@ -705,14 +724,37 @@ class MainWindow(QMainWindow):
             fields = getattr(form.connection, "host", None)
             if fields is not None and not fields.text().strip():
                 continue
+            serial_port = getattr(form.connection, "serial_port", None)
+            if serial_port is not None and not serial_port.currentText().strip():
+                continue
             _, endpoint = form.connection_config()
-            profile = ConnectionProfile(item.protocol.key, endpoint, form.profile_fields(), self._form_intervals[index])
+            profile = ConnectionProfile(item.protocol.key, endpoint, self._profile_fields(index), self._form_intervals[index])
             self._validate_runtime_config(profile)
             profiles.append(profile)
         return tuple(profiles)
 
     def _interval_changed(self, value):
         self._form_intervals[self.protocol.currentIndex()] = value
+
+    def _profile_fields(self, index=None):
+        index = self.protocol.currentIndex() if index is None else index
+        return {**self._forms[index].profile_fields(), **self._recovery_options[index].fields()}
+
+    def _edit_recovery(self):
+        from .recovery_dialog import RecoveryDialog
+        index = self.protocol.currentIndex()
+        dialog = RecoveryDialog(self, self._recovery_options[index])
+        try:
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self._recovery_options[index] = dialog.policy
+                if self._history is not None and isinstance(self._form, ProfileForm):
+                    try:
+                        _, endpoint = self._form.connection_config()
+                        self._remember_connection(endpoint)
+                    except ClientError:
+                        self.feedback.setText("恢复设置将在填写设备参数并保存或连接时保存")
+        finally:
+            dialog.deleteLater()
 
     def _protocol_changed(self, index):
         self.connection_forms.setCurrentIndex(index)
@@ -728,7 +770,7 @@ class MainWindow(QMainWindow):
         self._refresh()
 
     def _toggle_connection(self):
-        if self._state.connection == ConnectionState.ONLINE or (self._managed and self._state.connection == ConnectionState.CONNECTING):
+        if self._state.connection in (ConnectionState.ONLINE, ConnectionState.CONNECTING, ConnectionState.WAITING):
             self._state = replace(self._state, connection=ConnectionState.CLOSING)
             self._bridge.submit(self._session.disconnect())
         elif self._state.connection == ConnectionState.OFFLINE:
@@ -747,11 +789,17 @@ class MainWindow(QMainWindow):
                 self._refresh()
                 return
             self._state = replace(self._state, connection=ConnectionState.CONNECTING, endpoint=endpoint)
-            self._bridge.submit(self._session.connect(self._registration, config, endpoint))
+            self._bridge.submit(self._session.connect(self._registration, config, endpoint,
+                                                      self._recovery_options[self.protocol.currentIndex()]))
         self._refresh()
 
     def _read(self):
         self._execute(Command(self._form.target()))
+
+    def _protocol_command(self, form, command):
+        if (form is self._form and self._state.connection == ConnectionState.ONLINE
+                and not self._closing and self._state.queued < self._state.queue_capacity):
+            self._execute(command)
 
     def _write(self):
         target = self._form.target()
@@ -772,7 +820,7 @@ class MainWindow(QMainWindow):
     def _save_table_device(self):
         try:
             _, endpoint = self._form.connection_config()
-            profile = ConnectionProfile(self._registration.key, endpoint, self._form.profile_fields(), self.interval.value())
+            profile = ConnectionProfile(self._registration.key, endpoint, self._profile_fields(), self.interval.value())
             self._validate_runtime_config(profile)
             profiles = self._history.remember(profile)
             if self._managed:
@@ -853,6 +901,14 @@ class MainWindow(QMainWindow):
     def _stop_all_polling(self):
         self._bridge.submit(self._session.stop_all_polling())
 
+    def _subscribe_table(self, table, start, queue_size):
+        if start:
+            commands = tuple((point.id, Command(point.target)) for point in table.points)
+            self._bridge.submit(self._session.start_table_subscription(table.id, commands, table.interval_ms, queue_size))
+        else:
+            if self._state.session_id:
+                self._bridge.submit(self._session.stop_table_subscription(table.id))
+
     def _toggle_poll(self):
         if self._state.polling:
             self._stopping_poll = True
@@ -865,7 +921,8 @@ class MainWindow(QMainWindow):
         if self.before_close is not None and not self.before_close():
             return
         self._bind_device(None)
-        self._form.connection.host.clear()
+        self._recovery_options[self.protocol.currentIndex()] = RecoveryPolicy()
+        _clear_connection(self._form)
         self.recent_connections.setCurrentIndex(-1)
         self._query_changed()
 
@@ -877,7 +934,8 @@ class MainWindow(QMainWindow):
             for device in self._history.workspace.project.devices:
                 protocol = next(item.protocol for item in self._protocols if item.protocol.key == device.profile.protocol)
                 config = validate_profile(device.profile)
-                specifications.append((device.id, protocol, config, device.profile.endpoint))
+                specifications.append((device.id, protocol, config, device.profile.endpoint,
+                                       RecoveryPolicy.from_fields(device.profile.fields)))
         except (ClientError, ValueError, StopIteration) as error:
             self.feedback.setText(f"无法准备设备配置 · {error}")
             self._refresh()
@@ -953,7 +1011,7 @@ class MainWindow(QMainWindow):
             except ClientError:
                 continue
             if profile is not None and endpoint == profile.endpoint:
-                form.connection.host.clear()
+                _clear_connection(form)
         for cache in (self._device_states, self._last_reads, self._quick_values, self._sample_stores,
                       self._sample_definitions, self._device_errors, self._connection_configs):
             cache.pop(device_id, None)
@@ -1024,6 +1082,8 @@ class MainWindow(QMainWindow):
             store = self._samples_for(device_id)
             store.set_generation(state.generation)
             store.update(payload)
+        elif isinstance(payload, SubscriptionHealth):
+            self._samples_for(device_id).update_health(payload)
         elif isinstance(payload, OperationRejected) and device_id == self._active_device_id:
             self._handle_event(payload)
             return
@@ -1041,7 +1101,7 @@ class MainWindow(QMainWindow):
             self.recent_connections.setItemData(index, self._device_errors.get(device.id) or profile.endpoint, Qt.ItemDataRole.ToolTipRole)
         states = [self._device_states.get(item.id, SessionState()) for item in devices.values()]
         online = sum(state.connection == ConnectionState.ONLINE for state in states)
-        pending = sum(state.connection in (ConnectionState.CONNECTING, ConnectionState.CLOSING) for state in states)
+        pending = sum(state.connection in (ConnectionState.CONNECTING, ConnectionState.CLOSING, ConnectionState.WAITING) for state in states)
         self.overview.setText(f"已连接 {online}/{len(devices)} · 处理中 {pending}")
         self.new_device_button.setEnabled(not self._closing)
         self.connect_all_button.setEnabled(bool(devices) and not self._closing)
@@ -1061,14 +1121,20 @@ class MainWindow(QMainWindow):
             self._append_journal(event)
             if event.error or event.operation == "写入":
                 self.feedback.setText(f"{event.outcome} · {event.detail}" if event.detail else event.outcome)
-        elif isinstance(event, ReadUpdate) and event.generation == self._state.generation and event.command.target == self._form.target():
-            if event.points is not None:
-                self._last_read = event
-                self.results.reset(event.points)
-            elif self._last_read is not None:
-                self._last_read = replace(self._last_read, points=None)
+        elif isinstance(event, ReadUpdate) and event.generation == self._state.generation:
+            handle = getattr(self._form, "handle_read", None)
+            if handle is not None:
+                handle(event)
+            if event.command.target == self._form.target():
+                if event.points is not None:
+                    self._last_read = event
+                    self.results.reset(event.points)
+                elif self._last_read is not None:
+                    self._last_read = replace(self._last_read, points=None)
         elif isinstance(event, TableReadUpdate) and self.point_table_pane is not None:
             self.point_table_pane.handle_read(event)
+        elif isinstance(event, SubscriptionHealth) and self.point_table_pane is not None:
+            self.point_table_pane.samples.update_health(event)
         elif isinstance(event, OperationRejected) and event.generation == self._state.generation:
             self.feedback.setText(f"{event.operation}未执行 · {event.detail}")
             self.statusBar().showMessage(self.feedback.text(), 10000)
@@ -1165,6 +1231,24 @@ class MainWindow(QMainWindow):
         self.connection_status.setText(
             f"{state.connection} · {state.endpoint}" if state.endpoint else state.connection
         )
+        details = []
+        if state.recovery_attempt:
+            details.append(f"恢复尝试 {state.recovery_attempt}/{state.recovery_limit}")
+        if state.next_retry_at:
+            details.append(f"下次重试 {state.next_retry_at:%H:%M:%S}")
+        if state.last_communication_at:
+            details.append(f"最后成功通信 {state.last_communication_at:%H:%M:%S}")
+        if state.recovery_error:
+            details.append(state.recovery_error)
+        if self._registration.key == "modbus-rtu" and online:
+            details.append("串口已打开；各站号可达性请查看点位采样质量")
+        self.connection_status.setToolTip("\n".join(details))
+        self.recovery_button.setToolTip("\n".join(details) or "默认关闭；按设备配置重试与读取恢复")
+        self.recovery_button.setEnabled(offline and not self._closing)
+        if state.connection == ConnectionState.WAITING:
+            self.connection_status.setText(f"等待重试 {state.recovery_attempt}/{state.recovery_limit} · {state.next_retry_at:%H:%M:%S}")
+        elif offline and state.recovery_error:
+            self.connection_status.setText("恢复失败 · " + state.recovery_error)
         tone = "online" if online else "offline" if offline else "pending"
         if self.connection_status.property("tone") != tone:
             self.connection_status.setProperty("tone", tone)
@@ -1172,8 +1256,8 @@ class MainWindow(QMainWindow):
             style.unpolish(self.connection_status)
             style.polish(self.connection_status)
         self.feedback.setVisible(bool(self.feedback.text()))
-        cancelling = self._managed and state.connection == ConnectionState.CONNECTING
-        self.connection_button.setText("取消连接" if cancelling else "断开连接" if online else "连接")
+        cancelling = state.connection in (ConnectionState.CONNECTING, ConnectionState.WAITING)
+        self.connection_button.setText("停止重试" if state.connection == ConnectionState.WAITING else "取消连接" if cancelling else "断开连接" if online else "连接")
         self.connection_button.setEnabled((online or offline or cancelling) and not self._closing)
         self.protocol.setEnabled(offline and len(self._forms) > 1 and not self._closing)
         history_available = (self._managed or offline) and not self._closing
@@ -1182,6 +1266,9 @@ class MainWindow(QMainWindow):
                                             and self._active_device_id not in self._pending_removals)
         self.connection_forms.setEnabled(offline and not self._closing)
         self.query_forms.setEnabled((offline or idle) and not self._closing)
+        refresh_state = getattr(self._form, "refresh_state", None)
+        if refresh_state is not None:
+            refresh_state(state)
         self.read_button.setEnabled(idle)
         self.write_button.setEnabled(idle and self._registration.writable and self._form.can_write())
         self._refresh_write_summary()
@@ -1226,3 +1313,12 @@ class MainWindow(QMainWindow):
         self._closing = True
         self._refresh()
         self._bridge.shutdown()
+
+
+def _clear_connection(form):
+    host = getattr(form.connection, "host", None)
+    if host is not None:
+        host.clear()
+    else:
+        form.connection.serial_port.setCurrentIndex(-1)
+        form.connection.serial_port.setEditText("")

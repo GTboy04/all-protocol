@@ -71,7 +71,7 @@ def initialize(connection):
 
 def validate(connection):
     if (connection.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID
-            or connection.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION):
+            or connection.execute("PRAGMA user_version").fetchone()[0] not in (SCHEMA_VERSION, 2, 3)):
         raise ValueError("SQLite 数据库格式或版本无法识别")
 
 
@@ -109,12 +109,17 @@ def set_meta(connection, key, value):
 
 def write_plan(connection, record):
     protocol = record["protocol"]
+    if protocol == "opcua":
+        set_meta(connection, "opcua-settings", dumps({key: record[key] for key in ("security", "namespace_uri")}))
+    if protocol == "modbus-rtu":
+        set_meta(connection, "modbus-rtu-settings", dumps({key: record[key] for key in
+                 ("serial_port", "baudrate", "parity", "stopbits", "timeout_ms")}))
     connection.execute("DELETE FROM server_plans WHERE protocol=?", (protocol,))
     connection.execute("INSERT INTO server_plans VALUES (?, ?, ?, ?)",
-                       (protocol, record["schema_version"], record["host"], record["port"]))
-    groups = record["stations"] if protocol == "modbus-tcp" else [{"points": record["points"]}]
+                       (protocol, record["schema_version"], record.get("host", ""), record.get("port", 0)))
+    groups = record["stations"] if protocol in ("modbus-tcp", "modbus-rtu") else [{"points": record["points"]}]
     for station, group in enumerate(groups):
-        if protocol == "modbus-tcp":
+        if protocol in ("modbus-tcp", "modbus-rtu"):
             connection.execute("INSERT INTO server_stations VALUES (?, ?, ?, ?)",
                                (protocol, station, group["unit_id"], group["name"]))
         for position, point in enumerate(group["points"]):
@@ -141,13 +146,18 @@ def read_plan(connection, protocol):
         if rule is not None:
             point["simulation"] = json.loads(rule)
         groups.setdefault(station, []).append(point)
-    if protocol == "modbus-tcp":
+    if protocol in ("modbus-tcp", "modbus-rtu"):
         record["stations"] = [dict(unit_id=unit, name=name, points=groups.get(position, []))
                               for position, unit, name in connection.execute(
                                   "SELECT position, unit_id, name FROM server_stations WHERE protocol=? ORDER BY position",
                                   (protocol,))]
     else:
         record["points"] = groups.get(0, [])
+    if protocol == "modbus-rtu":
+        del record["host"], record["port"]
+        record.update(json.loads(get_meta(connection, "modbus-rtu-settings")))
+    if protocol == "opcua":
+        record.update(json.loads(get_meta(connection, "opcua-settings")))
     return record
 
 
@@ -157,9 +167,12 @@ def encode_project_database(record):
         connection.execute("PRAGMA foreign_keys=ON")
         initialize(connection)
         set_meta(connection, "kind", "project")
+        set_meta(connection, "project_version", str(record["schema_version"]))
         set_meta(connection, "name", record["name"])
         if "workspace_layout" in record:
             set_meta(connection, "workspace_layout", dumps(record["workspace_layout"]))
+        if "simulators" in record:
+            set_meta(connection, "simulators", dumps(record["simulators"]))
         for position, device in enumerate(record["devices"]):
             profile = device["profile"]
             connection.execute("INSERT INTO devices VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -175,6 +188,8 @@ def encode_project_database(record):
                 connection.execute("INSERT INTO named_points VALUES (?, ?, ?, ?)",
                                    (point["id"], table["id"], index,
                                     dumps({key: value for key, value in point.items() if key != "id"})))
+        if record["schema_version"] >= 4:
+            connection.execute("PRAGMA user_version=" + ("3" if record["schema_version"] >= 5 else "2"))
         connection.commit()
         return connection.serialize()
     except sqlite3.Error as error:
@@ -206,10 +221,17 @@ def decode_project_database(contents):
             points = [dict(json.loads(definition), id=point_id) for point_id, definition in connection.execute(
                 "SELECT id, definition FROM named_points WHERE table_id=? ORDER BY position", (id_,))]
             tables.append(dict(json.loads(definition), id=id_, device_id=device_id, points=points))
-        record = dict(format="all-protocol-project", schema_version=3, name=get_meta(connection, "name"),
+        record = dict(format="all-protocol-project", schema_version=int(get_meta(connection, "project_version") or 3), name=get_meta(connection, "name"),
                       devices=devices, servers={protocol: read_plan(connection, protocol)
-                                                for protocol in ("modbus-tcp", "s7")}, point_tables=tables)
+                                                for protocol in (("modbus-tcp", "s7", "modbus-rtu", "opcua") if
+                                                                 int(get_meta(connection, "project_version") or 3) >= 5 else
+                                                                 ("modbus-tcp", "s7", "modbus-rtu") if
+                                                                 int(get_meta(connection, "project_version") or 3) >= 4 else
+                                                                 ("modbus-tcp", "s7"))}, point_tables=tables)
         layout = get_meta(connection, "workspace_layout")
+        simulators = get_meta(connection, "simulators")
+        if simulators is not None:
+            record["simulators"] = json.loads(simulators)
         if layout is not None:
             record["workspace_layout"] = json.loads(layout)
         return record

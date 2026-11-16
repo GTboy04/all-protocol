@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from ipaddress import ip_address
 
 from ...application.contracts import ClientError, Value
+from ...bit_definitions import BitDefinition, validate_bit_definitions
 from ...application.simulation import SimulationPoint, SimulationRule, WriteSpan, compile_rule
 from .model import Area, DataType, S7Target
 
@@ -12,6 +13,7 @@ class S7ServerPoint:
     initial: Value = 0
     name: str = ""
     simulation: SimulationRule | None = None
+    bit_definitions: tuple[BitDefinition, ...] = ()
 
     def encode(self, value: Value) -> bytes:
         try:
@@ -42,6 +44,7 @@ class S7ServerPlan:
             if not isinstance(point.name, str):
                 raise ValueError("点位名称必须是文本")
             point.encode(point.initial)
+            validate_bit_definitions(point.bit_definitions, str(point.target.data_type))
             target = point.target
             mask = 1 << target.bit if target.data_type == DataType.BOOL else 0xFF
             for offset in range(target.offset, target.offset + target.byte_count):

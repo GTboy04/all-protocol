@@ -13,6 +13,8 @@
 
 ## R11 · Modbus RTU
 
+2026-11-14：R11 软件实现已接入，当前标记为预览版。已实现客户端、模拟服务端、项目 v4、点表、写入回读、CRC 诊断及报告。实机互通、虚拟串口对与拔插验收未完成；验证记录见 [R11 交付记录](../r11-modbus-rtu.md)。
+
 ### 交付范围
 
 - 设备配置使用 `modbus-rtu` 协议键，字段包含 `serial_port`、`baudrate`、`parity`、`stopbits`、`timeout_ms`。固定 8 数据位，默认建议 `9600 / 8E1`，允许按设备手册调整。支持 Windows COM 端口枚举与手动输入。
@@ -37,6 +39,8 @@
 
 ## R12 · OPC UA Client/Server
 
+2026-11-15：已实现 OPC UA 预览版，包含端点发现、节点浏览、标量读写/回读、点表轮询、数据变更订阅、证书固定信任、本机模拟端及场景推送。已用独立的同步 python-opcua 服务端验证加密互通，并以其客户端验证模拟端。模拟端首版仅允许回环地址且须显式启用无加密匿名模式；工业设备、独立厂商实现及打包版现场互通仍待验收。范围与验证见 [R12 交付记录](../r12-opc-ua.md)。
+
 1. **客户端浏览和轮询。** 先验证 `asyncua` 在 Python 3.12、Windows 和 PyInstaller 下能连接独立服务端。首版支持 `opc.tcp`、端点发现、按层浏览、标量读取和对可写变量的手动写入及回读。点表以命名空间 URI 和带类型的节点标识符保存目标，连接时解析服务器当前的命名空间索引。优先支持 JSON 点表，CSV 按节点地址字段另行设计。
 2. **数据质量和安全。** 保留 `DataValue` 的 `StatusCode`、源时间戳与服务器时间戳。`Good` 才更新最后有效值，`Uncertain` 单独展示，`Bad` 显示原始状态且保留此前有效值。当前 `Point` / `Sample` 契约需要可选的协议元数据。首版验收一个明确的 `SignAndEncrypt` 安全策略和信任证书流程。无加密匿名连接由用户显式选择。密码和私钥留在本机凭据或证书存储，项目、日志和报告只保存必要的非敏感摘要。诊断先记录服务名、节点、耗时和状态码，按实际捕获能力提供报文。
 3. **订阅和模拟端。** 在轮询通过验收后加入 `MonitoredItem` 数据变更通知。订阅事件需带会话身份和代次，断线重建后丢弃旧通知，并展示采样间隔、队列溢出及过期状态。模拟端以稳定命名空间和可配置标量节点提供读写，并将现有场景的变化推送给订阅客户端。方法调用、历史访问、复杂数据类型和 PubSub 单独评估。
@@ -44,6 +48,8 @@
 验收包括使用独立服务端完成浏览、读写和回读，覆盖未知节点、只读节点、类型不匹配、状态码映射、命名空间索引变化和不受信任证书。订阅阶段增加断线恢复、旧事件隔离，以及模拟端向独立客户端推送变更的测试。 [OPC UA 服务规范](https://reference.opcfoundation.org/specs/OPC-10000-4/full) · [DataValue](https://reference.opcfoundation.org/specs/OPC-10000-4/7.11) · [证书管理](https://reference.opcfoundation.org/specs/OPC-10000-2/9.4.2) · [asyncua](https://github.com/FreeOpcUa/opcua-asyncio)
 
 ## 后续候选
+
+下一轮选型与立项条件见 [R19 · 按目标设备扩展协议能力](R19-protocol-selection.md)；现有协议的现场验收与运行恢复见 [R13](R13-runtime-reliability.md)。以下候选尚未立项，不代表已支持或已排定交付。趋势、联调用例和其他非协议计划见[需求索引](README.md#下一阶段计划2026-11-15)。
 
 - **EtherNet/IP（CIP）。** 有 Logix 实机后，以显式消息读取控制器和程序作用域的标量标签，记录路由路径、目标槽位及 CIP 通用和附加状态。先固定支持的机型和类型，再验证读写回读及目标不存在、路由错误等失败路径。周期 I/O 与设备模拟另行评估。 [ODVA EtherNet/IP 概览](https://www.odva.org/publication_download/ethernet-ip-technology-overview/) · [Rockwell Logix 标签访问指南](https://literature.rockwellautomation.com/idc/groups/literature/documents/pm/1756-pm020_-en-p.pdf)
 - **MQTT 5。** 现场网关以遥测上报为主时，可提前安排。用独立消息视图显示主题、载荷、QoS、保留标记、到达时间及连接状态，先通过现成 Broker 验证重连、重订阅、保留消息及 QoS 1 重复投递。发布结果单独显示 Broker 应答。设备执行结果由业务应答主题和关联 ID 确认。完成主题监视后，再按约定把结构化载荷映射为点位。 [OASIS MQTT 5.0](https://docs.oasis-open.org/mqtt/mqtt/v5.0/mqtt-v5.0.html)

@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 
@@ -26,14 +26,18 @@ class ServerWorkbench(QMainWindow):
     overview_changed = Signal()
     stopped = Signal()
 
-    def __init__(self, return_home, protocols_and_storages, *, embedded=False):
+    def __init__(self, return_home, protocols_and_storages, *, embedded=False, workspace=None, protocols=None, storage_factory=None):
         super().__init__()
         self.setWindowTitle("工业协议调试台 · 服务端")
         self.resize(1120, 800)
         self.setMinimumWidth(0 if embedded else 820)
         self._checking_close = False
         self._closing = False
-        self._stopped = 0
+        self._stopped = set()
+        self.workspace = workspace
+        self.available_protocols = protocols or {}
+        self.storage_factory = storage_factory
+        self._storages = []
         self._embedded = embedded
         self._bridges = []
         self._protocols = []
@@ -87,12 +91,20 @@ class ServerWorkbench(QMainWindow):
         registration = protocol.registration
         create_session = partial(ServerSession, registration=registration)
         bridge = IoBridge(create_session, ServerSession.stop)
+        try:
+            pane = protocol.create_pane(bridge, storage)
+        except Exception:
+            bridge.join()
+            raise
         self._bridges.append(bridge)
-        pane = protocol.create_pane(bridge, storage)
+        self._storages.append(storage)
+        if getattr(storage, "simulator_id", None):
+            protocol = replace(protocol, registration=replace(registration, key=storage.simulator_id, label=storage.simulator_name))
         self._protocols.append(protocol)
         self.tabs.addTab(pane, registration.label)
         pane.listener_changed.connect(self._refresh_overview)
-        bridge.stopped.connect(self._io_stopped, Qt.ConnectionType.QueuedConnection)
+        bridge.stopped.connect(partial(self._io_stopped, bridge), Qt.ConnectionType.QueuedConnection)
+        return pane
 
     def _refresh_overview(self):
         listening = 0
@@ -125,8 +137,62 @@ class ServerWorkbench(QMainWindow):
             pane._refresh()
 
     def project_plans(self):
+        if self.workspace is not None and self.workspace.project.simulators is not None:
+            from ..project import ProjectSimulator
+            return {"simulators": tuple(ProjectSimulator(protocol.registration.key, protocol.registration.label,
+                        storage.simulator_protocol, self.tabs.widget(index).configuration_plan())
+                        for index, (protocol, storage) in enumerate(zip(self._protocols, self._storages)))}
         return {protocol.project_field: self.tabs.widget(index).configuration_plan()
                 for index, protocol in enumerate(self._protocols) if protocol.project_field is not None}
+
+    def simulator_snapshot(self):
+        from ..project import ProjectSimulator
+        return tuple(ProjectSimulator(protocol.registration.key, protocol.registration.label, storage.simulator_protocol,
+                                      self.tabs.widget(index).configuration_plan())
+                     for index, (protocol, storage) in enumerate(zip(self._protocols, self._storages)))
+
+    def add_simulator(self, item):
+        if len(self._protocols) >= 64:
+            raise ValueError("最多 64 个模拟服务")
+        item.plan.validate()
+        # Keep every unsaved form edit when promoting a legacy project.
+        previous = self.workspace.project
+        self.workspace.project = replace(previous, simulators=self.simulator_snapshot() + (item,))
+        try:
+            pane = self._add(self.available_protocols[item.protocol], self.storage_factory(item))
+        except Exception:
+            self.workspace.project = previous
+            raise
+        self.tabs.setCurrentWidget(pane)
+        self._refresh_overview()
+        return pane
+
+    def rename_simulator(self, key, name):
+        items = tuple(replace(item, name=name) if item.id == key else item for item in self.simulator_snapshot())
+        self.workspace.project = replace(self.workspace.project, simulators=items)
+        index = next(i for i, protocol in enumerate(self._protocols) if protocol.registration.key == key)
+        protocol = self._protocols[index]
+        self._protocols[index] = replace(protocol, registration=replace(protocol.registration, label=name))
+        self._refresh_overview()
+
+    def remove_simulator(self, key):
+        index = next(i for i, protocol in enumerate(self._protocols) if protocol.registration.key == key)
+        pane = self.tabs.widget(index)
+        if pane.state != ListenerState.STOPPED:
+            raise ValueError("请先停止该模拟设备的服务，再删除")
+        items = tuple(item for item in self.simulator_snapshot() if item.id != key)
+        bridge = self._bridges[index]
+        bridge.join()
+        self._stopped.discard(bridge)
+        self.tabs.removeTab(index)
+        self._protocols.pop(index)
+        self._storages.pop(index)
+        self._bridges.pop(index)
+        self.workspace.project = replace(self.workspace.project, simulators=items)
+        pane.journal_panel.hide()
+        pane.journal_panel.setParent(pane)
+        pane.deleteLater()
+        self._refresh_overview()
 
     def request_close(self, *, confirm_listeners=True):
         if self._closing:
@@ -163,15 +229,17 @@ class ServerWorkbench(QMainWindow):
         for bridge in self._bridges:
             bridge.join()
 
-    def _io_stopped(self):
-        self._stopped += 1
-        if self._stopped == len(self._bridges):
+    def _io_stopped(self, bridge):
+        if bridge not in self._bridges:
+            return
+        self._stopped.add(bridge)
+        if len(self._stopped) == len(self._bridges):
             if not self._embedded:
                 self.close()
             self.stopped.emit()
 
     def closeEvent(self, event):
-        if self._stopped == len(self._bridges):
+        if len(self._stopped) == len(self._bridges):
             event.accept()
         else:
             event.ignore()

@@ -192,7 +192,7 @@ def test_switching_server_tabs_keeps_connections_and_app_close_releases_ports(tm
                 assert s7.points.index(1, 0).data() == "IB0"
                 s7.save.click()
                 s7.listen.click()
-                wait_for(lambda: "2 / 2" in workbench.overview.text())
+                wait_for(lambda: "2 / 4" in workbench.overview.text())
                 assert str(modbus_port) in workbench.tabs.tabText(0)
                 assert str(s7_port) in workbench.tabs.tabText(1)
                 s7_client.connect("127.0.0.1", 0, 1, tcp_port=s7_port)
@@ -210,7 +210,7 @@ def test_switching_server_tabs_keeps_connections_and_app_close_releases_ports(tm
                     s7_client.db_read(1, 0, 2)
                 s7_client.disconnect()
                 s7.listen.click()
-                wait_for(lambda: "2 / 2" in workbench.overview.text())
+                wait_for(lambda: "2 / 4" in workbench.overview.text())
                 s7_client.connect("127.0.0.1", 0, 1, tcp_port=s7_port)
                 assert s7_client.db_read(1, 0, 2) == bytes.fromhex("0000")
                 assert role.close()

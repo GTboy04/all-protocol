@@ -4,7 +4,7 @@ from datetime import datetime
 from PySide6.QtCore import QSignalBlocker, Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton, QScrollArea, QSizePolicy,
-    QSplitter, QStackedWidget, QTabBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QSplitter, QStackedWidget, QTabBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget, QInputDialog, QMessageBox,
 )
 
 from ..application.contracts import ConnectionState
@@ -106,6 +106,16 @@ class ProjectWindow(QMainWindow):
         self.tree.setUniformRowHeights(True)
         self.tree.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.tree.currentItemChanged.connect(self._tree_selected)
+        navigation_panel = QWidget()
+        navigation_layout = QVBoxLayout(navigation_panel)
+        navigation_layout.setContentsMargins(8, 8, 8, 0)
+        self.add_client = self._button("添加设备", self._add_client)
+        self.add_simulator = self._button("添加模拟设备…", self._add_simulator)
+        self.add_client.setToolTip("添加要连接的远程设备")
+        self.add_simulator.setToolTip("添加在本机运行的独立模拟设备 / 服务")
+        navigation_layout.addWidget(self.add_client)
+        navigation_layout.addWidget(self.add_simulator)
+        navigation_layout.addWidget(self.tree, 1)
 
         content = QWidget()
         body = QVBoxLayout(content)
@@ -120,6 +130,12 @@ class ProjectWindow(QMainWindow):
         context.addWidget(self.nav_button)
         self.context = _ContextLabel()
         context.addWidget(self.context, 1)
+        self.rename_simulator = self._button("重命名…", self._rename_simulator)
+        self.copy_simulator = self._button("复制设备…", lambda: self._add_simulator(copy=True))
+        self.remove_simulator = self._button("删除设备…", self._remove_simulator)
+        self.add_bus_station = self._button("新增从站…", self._add_bus_station)
+        for button in (self.add_bus_station, self.rename_simulator, self.copy_simulator, self.remove_simulator):
+            context.addWidget(button)
         self.server_view = QTabBar()
         self.server_view.setAccessibleName("服务端视图")
         self.server_view.addTab("方案")
@@ -142,9 +158,10 @@ class ProjectWindow(QMainWindow):
         body.addWidget(scroll, 1)
         self.navigation = QSplitter(Qt.Orientation.Horizontal)
         self.navigation.setChildrenCollapsible(False)
-        self.navigation.addWidget(self.tree)
+        self.navigation.addWidget(navigation_panel)
+        self.navigation_panel = navigation_panel
         self.navigation.addWidget(content)
-        self.tree.setVisible(self.nav_button.isChecked())
+        navigation_panel.setVisible(self.nav_button.isChecked())
         self.navigation.setStretchFactor(0, 1)
         self.navigation.setStretchFactor(1, 1)
         self.navigation.splitterMoved.connect(self._remember_navigation)
@@ -205,6 +222,7 @@ class ProjectWindow(QMainWindow):
 
     def _toggle_tree(self, visible):
         self.tree.setVisible(visible)
+        self.navigation_panel.setVisible(visible)
         if visible:
             self._restore_navigation_size()
 
@@ -264,8 +282,8 @@ class ProjectWindow(QMainWindow):
 
     def _selection(self):
         if self._on_server:
-            return ("server", next(key for key, (index, _, _) in self._panes.items()
-                                   if index == self.servers.tabs.currentIndex()))
+            return ("server", next((key for key, (index, _, _) in self._panes.items()
+                                   if index == self.servers.tabs.currentIndex()), ""))
         device_id = self.client._active_device_id or ""
         if self.client.point_views.currentIndex() == 1:
             table = self.client.point_table_pane.table
@@ -319,6 +337,70 @@ class ProjectWindow(QMainWindow):
         if not self._closing and not self._updates.isActive():
             self._updates.start()
 
+    def _sync_servers(self):
+        self._panes = {registration.key: (index, registration.label, pane)
+                       for index, (registration, pane) in enumerate(self.servers.panes())}
+        for _, _, pane in self._panes.values():
+            if self.logs.indexOf(pane.journal_panel) < 0:
+                pane.journal_heading.hide()
+                self.logs.addWidget(pane.journal_panel)
+                pane.show_workspace_values(bool(self.server_view.currentIndex()))
+        if not self._panes:
+            self._on_server = False
+
+    def _add_client(self):
+        self.client.new_device_button.click()
+        self.client.point_views.setCurrentIndex(0)
+        self._on_server = False
+        self._refresh_navigation()
+
+    def _add_simulator(self, _checked=False, *, copy=False):
+        from .simulator_dialog import add_simulator_dialog
+        source = None
+        if copy:
+            source = next((item for item in self.servers.simulator_snapshot() if item.id == self._selection()[1]), None)
+            if source is None:
+                return
+        def added(key):
+            self._sync_servers()
+            self._select(("server", key))
+        selected = next((item.protocol for item in self.servers.simulator_snapshot()
+                         if self._on_server and item.id == self._selection()[1]), None)
+        add_simulator_dialog(self, self.servers, added, source, selected)
+
+    def _rename_simulator(self):
+        key = self._selection()[1]
+        name, accepted = QInputDialog.getText(self, "重命名模拟设备", "设备名称", text=self._panes[key][1])
+        if accepted:
+            if not name.strip() or len(name.strip()) > 200:
+                QMessageBox.warning(self, "名称无效", "设备名称必须为 1–200 字符")
+                return
+            self.servers.rename_simulator(key, name.strip())
+            self._refresh_navigation()
+
+    def _remove_simulator(self):
+        key = self._selection()[1]
+        _, label, pane = self._panes[key]
+        if pane.state != ListenerState.STOPPED:
+            QMessageBox.information(self, "删除模拟设备", "请先停止该设备的服务，再删除。其他设备可继续运行。")
+            return
+        if QMessageBox.question(self, "删除模拟设备", f"删除「{label}」及其点位和模拟规则？保存项目后生效。") != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.servers.remove_simulator(key)
+        except ValueError as error:
+            QMessageBox.warning(self, "无法删除设备", str(error))
+            return
+        self._sync_servers()
+        if self._panes:
+            self._select(("server", next(iter(self._panes))))
+        else:
+            self._refresh_navigation()
+
+    def _add_bus_station(self):
+        pane = self._panes[self._selection()[1]][2]
+        pane._edit_station(True)
+
     def _rebuild_tree(self, devices, tables):
         expanded = {key for key, item in self._items.items() if item.isExpanded()}
         first = not self._items
@@ -348,6 +430,7 @@ class ProjectWindow(QMainWindow):
                 add(servers, ("server", key), label)
 
     def _refresh_navigation(self):
+        self._sync_servers()
         project = self.workspace.project
         devices = tuple((device.id, device.name) for device in project.devices)
         tables = tuple((table.device_id, table.id, table.name) for table in project.point_tables)
@@ -357,9 +440,10 @@ class ProjectWindow(QMainWindow):
         online = listening = 0
         errors = {}
         with QSignalBlocker(self.tree):
-            if (devices, tables) != self._structure:
+            structure = (devices, tables, tuple((key, label) for key, (_, label, _) in self._panes.items()))
+            if structure != self._structure:
                 self._rebuild_tree(devices, tables)
-                self._structure = devices, tables
+                self._structure = structure
             for device in project.devices:
                 key = ("device", device.id)
                 state, error = self.client.workspace_device_status(device.id)
@@ -385,6 +469,12 @@ class ProjectWindow(QMainWindow):
         self.error_button.setToolTip("\n".join(f"{name}：{error}" for name, error in errors.values()))
         self.pages.setCurrentWidget(self.servers if self._on_server else self.client)
         self.server_view.setVisible(self._on_server)
+        for button in (self.rename_simulator, self.copy_simulator, self.remove_simulator):
+            button.setVisible(self._on_server)
+        pane = self._panes[value][2] if self._on_server else None
+        bus = pane is not None and hasattr(pane, "add_station")
+        self.add_bus_station.setVisible(bus)
+        self.add_bus_station.setEnabled(bus and pane.state == ListenerState.STOPPED)
         self.logs.setCurrentWidget(self._panes[value][2].journal_panel if self._on_server else self.client.journal_panel)
         names = dict(devices)
         if kind == "table":
@@ -437,7 +527,9 @@ class ProjectWindow(QMainWindow):
             self._report.open()
 
     def _capture_report(self, scope, frozen_at):
-        return ReportSnapshot.capture(self.workspace.project, scope, self.client.report_log(),
+        self._sync_servers()
+        project = replace(self.workspace.project, **self.servers.project_plans())
+        return ReportSnapshot.capture(project, scope, self.client.report_log(),
                                       tuple((protocol, pane.report_log()) for protocol, (_, _, pane) in self._panes.items()),
                                       self._opened_at, frozen_at)
 

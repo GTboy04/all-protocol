@@ -17,12 +17,17 @@ from .adapters.modbus_tcp.server_model import ServerPlan, ServerPoint, Station
 from .adapters.modbus_tcp.values import DataType, RegisterOrder
 from .adapters.s7.model import Area as S7Area, DataType as S7DataType, S7Target
 from .adapters.s7.server_model import S7ServerPlan, S7ServerPoint
+from .adapters.opcua.model import UaTarget
+from .adapters.opcua.server_model import UaServerPlan, UaServerPoint
 from .application.contracts import (
-    ErrorKind, JournalEntry, VerificationOptions, VerificationResult, VerificationStatus, WriteResult, WriteStatus,
+    ClientError, ErrorKind, JournalEntry, VerificationOptions, VerificationResult, VerificationStatus, WriteResult, WriteStatus,
+    ValueMetadata,
 )
 from .application.journal import VISIBLE_LOG_ROWS, LogRetention, RetainedLog
+from .application.recovery import RecoveryPolicy
 from .application.server_contracts import LifecycleAction, RequestMetadata, ServerEvent, ServerLifecycle
 from .application.simulation import decode_rule
+from .bit_definitions import bit_definition_records, decode_bit_definitions
 from .point_tables import decode_target, target_record
 from .database import DATABASE_NAME, connect, dumps, get_meta, set_meta, read_plan, write_plan
 
@@ -66,6 +71,10 @@ def _load_profile(data) -> ConnectionProfile | None:
     if (isinstance(protocol, str) and protocol and isinstance(endpoint, str) and endpoint
             and isinstance(fields, dict) and all(type(value) in (str, int) for value in fields.values())
             and type(interval) is int and 200 <= interval <= 30000):
+        try:
+            RecoveryPolicy.from_fields(fields)
+        except ValueError:
+            return None
         return ConnectionProfile(protocol, endpoint, fields, interval)
     return None
 
@@ -86,6 +95,17 @@ def _load_entry(data: dict) -> JournalEntry:
     data["time"] = datetime.fromisoformat(data["time"])
     data["error"] = ErrorKind(data["error"]) if data["error"] is not None else None
     data["packets"] = tuple((sending, bytes.fromhex(payload)) for sending, payload in data["packets"])
+    metadata = []
+    for item in data.get("value_metadata", []):
+        item = dict(item)
+        if (type(item.get("status_code")) is not int or not 0 <= item["status_code"] <= 0xFFFFFFFF
+                or not isinstance(item.get("status_name"), str) or item.get("quality") not in ("Good", "Uncertain", "Bad")):
+            raise ValueError("Invalid protocol value metadata")
+        for key in ("source_timestamp", "server_timestamp"):
+            if item.get(key) is not None:
+                item[key] = datetime.fromisoformat(item[key])
+        metadata.append(ValueMetadata(**item))
+    data["value_metadata"] = tuple(metadata)
     if (write := data.get("write")) is not None:
         if not isinstance(write, dict):
             raise ValueError("Invalid write evidence")
@@ -286,11 +306,14 @@ class LocalHistory:
         record = asdict(entry)
         record["time"] = entry.time.isoformat()
         record["packets"] = [(sending, packet.hex()) for sending, packet in entry.packets]
+        for item in record["value_metadata"]:
+            for key in ("source_timestamp", "server_timestamp"):
+                item[key] = item[key].isoformat() if item[key] is not None else None
         if entry.write is None:
             del record["write"]
         else:
             target = entry.write.target
-            encoded = target_record(target) if isinstance(target, (ModbusTarget, S7Target)) else None
+            encoded = target_record(target) if isinstance(target, (ModbusTarget, S7Target, UaTarget)) else None
             if isinstance(target, ModbusTarget) and target.data_type is None:
                 encoded["data_type"] = None
             record["write"]["target"] = encoded
@@ -377,6 +400,10 @@ class _ServerJournal:
 
 def _point_record(point) -> dict:
     record = asdict(point)
+    if point.bit_definitions:
+        record["bit_definitions"] = bit_definition_records(point.bit_definitions)
+    else:
+        del record["bit_definitions"]
     if point.simulation is None:
         del record["simulation"]
     else:
@@ -388,13 +415,14 @@ def encode_modbus_plan(plan: ServerPlan) -> dict:
     stations = [{"unit_id": station.unit_id, "name": station.name,
                  "points": [_point_record(point) for point in station.points]} for station in plan.stations]
     has_rules = any("simulation" in point for station in stations for point in station["points"])
-    return {"schema_version": 3 if has_rules else 2, "protocol": "modbus-tcp",
+    has_bits = any("bit_definitions" in point for station in stations for point in station["points"])
+    return {"schema_version": 4 if has_bits else 3 if has_rules else 2, "protocol": "modbus-tcp",
             "host": plan.host, "port": plan.port, "stations": stations}
 
 
 def decode_modbus_plan(data) -> ServerPlan:
     if (not isinstance(data, dict) or type(data.get("schema_version")) is not int
-            or data["schema_version"] not in (1, 2, 3) or data.get("protocol") != "modbus-tcp"):
+            or data["schema_version"] not in (1, 2, 3, 4) or data.get("protocol") != "modbus-tcp"):
         raise ValueError("方案版本或协议无法识别")
     if not isinstance(data["stations"], list):
         raise ValueError("从站必须是列表")
@@ -408,6 +436,7 @@ def decode_modbus_plan(data) -> ServerPlan:
                 DataType(point["data_type"]) if point.get("data_type") is not None else None,
                 RegisterOrder(point.get("order", RegisterOrder.BIG)),
                 decode_rule(point.get("simulation")),
+                decode_bit_definitions(point.get("bit_definitions", [])),
             )
             for point in station["points"]
         ))
@@ -441,13 +470,13 @@ class ServerStorage(_ServerJournal):
 def encode_s7_plan(plan: S7ServerPlan) -> dict:
     points = [_point_record(point) for point in plan.points]
     has_rules = any("simulation" in point for point in points)
-    return {"schema_version": 2 if has_rules else 1, "protocol": "s7",
+    return {"schema_version": 3 if any(p.bit_definitions for p in plan.points) else 2 if has_rules else 1, "protocol": "s7",
             "host": plan.host, "port": plan.port, "points": points}
 
 
 def decode_s7_plan(data) -> S7ServerPlan:
     if (not isinstance(data, dict) or type(data.get("schema_version")) is not int
-            or data["schema_version"] not in (1, 2) or data.get("protocol") != "s7"):
+            or data["schema_version"] not in (1, 2, 3) or data.get("protocol") != "s7"):
         raise ValueError("S7 方案版本或协议无法识别")
     if not isinstance(data["points"], list):
         raise ValueError("点位必须是列表")
@@ -458,6 +487,7 @@ def decode_s7_plan(data) -> S7ServerPlan:
             S7Target(S7Area(target["area"]), target["db"], target["offset"],
                      S7DataType(target["data_type"]), target["count"], target["bit"]),
             point["initial"], point["name"], decode_rule(point.get("simulation")),
+            decode_bit_definitions(point.get("bit_definitions", [])),
         ))
     plan = S7ServerPlan(data["host"], data["port"], tuple(points))
     plan.validate()
@@ -507,3 +537,85 @@ def _save_database_plan(storage, plan, encode):
     with connect(storage.database_path) as connection:
         write_plan(connection, encode(plan))
         set_meta(connection, "migrated:" + storage.plan_path.name, "1")
+
+
+def encode_rtu_plan(plan):
+    from .adapters.modbus_rtu.server_model import RtuServerPlan
+    if not isinstance(plan, RtuServerPlan):
+        raise ValueError("需要 RTU 服务端方案")
+    record = encode_modbus_plan(ServerPlan(stations=plan.stations))
+    record.update(protocol="modbus-rtu", serial_port=plan.serial_port, baudrate=plan.baudrate,
+                  parity=plan.parity, stopbits=plan.stopbits, timeout_ms=plan.timeout_ms)
+    del record["host"], record["port"]
+    return record
+
+
+def decode_rtu_plan(data):
+    from .adapters.modbus_rtu.server_model import RtuServerPlan
+    if not isinstance(data, dict) or data.get("protocol") != "modbus-rtu":
+        raise ValueError("无效的 RTU 方案")
+    stations = decode_modbus_plan(dict(data, protocol="modbus-tcp", host="127.0.0.1", port=1502)).stations
+    plan = RtuServerPlan(*(data[key] for key in ("serial_port", "baudrate", "parity", "stopbits", "timeout_ms")), stations)
+    plan.validate()
+    return plan
+
+
+class RtuServerStorage(ServerStorage):
+    _journal_protocol = "modbus-rtu"
+
+    def __init__(self, directory):
+        super().__init__(directory)
+        self.plan_path = directory / "modbus-rtu-server.json"
+        self.journal_path = directory / "modbus-rtu-server-requests.jsonl"
+
+    def load_plan(self):
+        from .adapters.modbus_rtu.server_model import RtuServerPlan
+        with connect(self.database_path) as connection:
+            record = read_plan(connection, self._journal_protocol)
+        if record is None and not self.plan_path.exists():
+            return RtuServerPlan()
+        return _load_database_plan(self, decode_rtu_plan, encode_rtu_plan, RtuServerPlan)
+
+    def save_plan(self, plan):
+        _save_database_plan(self, plan, encode_rtu_plan)
+
+
+def encode_ua_plan(plan):
+    return {"schema_version": 2 if any(p.bit_definitions for p in plan.points) else 1, "protocol": "opcua", "host": plan.host, "port": plan.port,
+            "security": plan.security, "namespace_uri": plan.namespace_uri,
+            "points": [{**_point_record(point), "target": target_record(point.target)} for point in plan.points]}
+
+
+def decode_ua_plan(data):
+    if (not isinstance(data, dict) or data.get("protocol") != "opcua"
+            or type(data.get("schema_version")) is not int or data["schema_version"] not in (1, 2)
+            or not isinstance(data.get("points"), list)):
+        raise ValueError("OPC UA 模拟端方案无效")
+    try:
+        points = tuple(UaServerPoint(decode_target("opcua", item["target"]), item["initial"], item["name"],
+                                    item["writable"], decode_rule(item.get("simulation")),
+                                    decode_bit_definitions(item.get("bit_definitions", []))) for item in data["points"])
+        plan = UaServerPlan(data["host"], data["port"], points, data["security"], data["namespace_uri"])
+        plan.validate()
+        return plan
+    except (KeyError, TypeError, ClientError) as error:
+        raise ValueError("OPC UA 模拟端字段无效") from error
+
+
+class UaServerStorage(_ServerJournal):
+    _journal_protocol = "opcua"
+    _legacy_detail_types = {}
+
+    def __init__(self, directory):
+        self.directory = directory
+        self.database_path = directory / DATABASE_NAME
+        self.plan_path = directory / "opcua-server.json"
+        self.journal_path = directory / "opcua-server-requests.jsonl"
+
+    def load_plan(self):
+        with connect(self.database_path) as connection:
+            record = read_plan(connection, "opcua")
+        return decode_ua_plan(record) if record is not None else UaServerPlan()
+
+    def save_plan(self, plan):
+        _save_database_plan(self, plan, encode_ua_plan)

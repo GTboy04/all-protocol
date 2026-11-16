@@ -59,7 +59,7 @@ def choose_button(app, role):
 
 def test_create_save_open_dual_protocol_project_without_network(desktop, monkeypatch, tmp_path):
     app, home, errors = desktop
-    home._server_protocols = home._server_protocols[::-1]
+    home._server_protocols = (home._server_protocols[1], home._server_protocols[0], home._server_protocols[2])
     monkeypatch.setattr(QInputDialog, "getText", lambda *_args: ("工厂联调", True))
     home.project_buttons["新建项目"].click()
     assert home.workspace.project.name == "工厂联调"
@@ -81,7 +81,7 @@ def test_create_save_open_dual_protocol_project_without_network(desktop, monkeyp
     s7._points = (replace(s7._points[0], initial=123, name="反馈"),)
     s7._memory = S7Memory(s7._points)
     s7._memory.set_point(s7._points[0], 987)
-    assert all(server.tabs.widget(index).state == ListenerState.STOPPED for index in range(2))
+    assert all(server.tabs.widget(index).state == ListenerState.STOPPED for index in range(3))
     assert s7.save.text() == "应用到项目"
     path = tmp_path / "项目.allprotocol"
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(path), ""))
@@ -111,7 +111,7 @@ def test_create_save_open_dual_protocol_project_without_network(desktop, monkeyp
     restored_server = home.project_window.servers
     assert restored_server.tabs.widget(1).port.value() == 2502
     assert restored_server.tabs.widget(0)._points[0].initial == 123
-    assert all(restored_server.tabs.widget(index).state == ListenerState.STOPPED for index in range(2))
+    assert all(restored_server.tabs.widget(index).state == ListenerState.STOPPED for index in range(3))
     assert not errors
 
 

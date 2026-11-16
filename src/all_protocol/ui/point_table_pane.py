@@ -3,14 +3,15 @@ from pathlib import Path
 
 from PySide6.QtCore import QSignalBlocker, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
-    QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QDialogButtonBox, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+    QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSplitter, QVBoxLayout, QWidget,
 )
 
 from ..application.contracts import ClientError, ConnectionState, SessionState, TableReadUpdate
 from ..application.sampling import Quality, SampleStore
 from ..application.binary import binary_text, bit_pattern, target_kind
 from .bit_inspector import BitReading, show_bit_inspector
+from .bit_definitions_editor import BitDefinitionsEditor
 from ..point_tables import (
     IMPORT_LIMIT_BYTES, PointDefinition, PointTable, export_points_csv, export_table_json,
     import_points_csv, import_table_json, new_id, target_record,
@@ -18,11 +19,16 @@ from ..point_tables import (
 from ..storage import _replace_file
 from .main_window import Rows, _table
 from .widgets import EditDialog
-from .widgets import spinbox
+from .widgets import configure_point_reordering, reordered_points, set_point_reordering_enabled, spinbox
 
 
 def _definition_row(point):
     return (point.name, point.target.label, point.unit, str(point.scale), str(point.offset), point.description)
+
+
+def _matches(point, query):
+    text = "\n".join((point.name, point.target.label, point.description)).casefold()
+    return all(word in text for word in query.casefold().split())
 
 
 class PointDialog(EditDialog):
@@ -44,19 +50,25 @@ class PointDialog(EditDialog):
         self.scale = QLineEdit(str(original.scale) if original else "1")
         self.offset = QLineEdit(str(original.offset) if original else "0")
         self.precision = spinbox(0, 12, original.precision if original else 3)
-        self.description = QLineEdit(original.description if original else "")
+        self.description = QPlainTextEdit(original.description if original else "")
+        self.description.setAccessibleName("点位功能描述")
+        self.description.setPlaceholderText("用途：控制或监测什么\n取值含义：例如 0=停止，1=运行\n操作注意事项：例如写入前确认设备已停机")
+        self.description.setMinimumHeight(115)
+        self.bit_definitions = BitDefinitionsEditor(lambda: target_kind(self.target_form.target()),
+                                                   original.bit_definitions if original else ())
         for label, field in (("名称", self.name), ("协议地址", self.target_form.query), ("单位", self.unit),
                              ("倍率", self.scale), ("偏置", self.offset), ("小数位数", self.precision),
-                             ("说明", self.description)):
+                             ("功能描述", self.description), ("逐位定义", self.bit_definitions)):
             self.form.addRow(label, field)
         self.protocol = device.profile.protocol
-        self.resize(760, 420)
+        self.resize(760, 560)
 
     def _commit(self):
         try:
             definition = PointDefinition(self.original.id if self.original else new_id(), self.name.text().strip(),
                                          self.target_form.target(), self.unit.text(), float(self.scale.text()),
-                                         float(self.offset.text()), self.description.text(), self.precision.value())
+                                         float(self.offset.text()), self.description.toPlainText(), self.precision.value(),
+                                         self.bit_definitions.definitions)
             definition.validate(self.protocol)
         except ClientError as error:
             raise ValueError(str(error)) from error
@@ -146,12 +158,13 @@ class PointTablePane(QWidget):
     workspace_changed = Signal()
 
     def __init__(self, workspace, device, create_form, save_device, read_table, write_point, can_write,
-                 poll_table, stop_all, *, embedded=False):
+                 poll_table, stop_all, *, subscribe_table=None, embedded=False):
         super().__init__()
         self.workspace, self.device, self.create_form = workspace, device, create_form
         self.save_device, self.read_table, self.write_point = save_device, read_table, write_point
         self.can_write = can_write
         self.poll_table, self.stop_all = poll_table, stop_all
+        self.subscribe_table = subscribe_table
         self._embedded = embedded
         self.state = SessionState()
         self._context = None
@@ -166,7 +179,6 @@ class PointTablePane(QWidget):
         self.context.setTextFormat(Qt.TextFormat.PlainText)
         self.context.setWordWrap(True)
         layout.addWidget(self.context)
-        from PySide6.QtWidgets import QComboBox
         self.tables = QComboBox()
         self.tables.setAccessibleName("点表")
         self.tables.setMinimumContentsLength(14)
@@ -178,6 +190,21 @@ class PointTablePane(QWidget):
                             ("删除点表", self._delete), ("导入…", self._import), ("导出 JSON…", self._export)):
             self._button(toolbar, label, slot)
         layout.addLayout(toolbar)
+        search_bar = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setAccessibleName("搜索点位")
+        self.search.setPlaceholderText("搜索名称、地址或功能描述（空格分隔多个关键词）")
+        self.search.setClearButtonEnabled(True)
+        search_bar.addWidget(self.search, 2)
+        self.search_results = QComboBox()
+        self.search_results.setAccessibleName("定位搜索结果")
+        self.search_results.setMinimumContentsLength(18)
+        self.search_results.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.search_results.setToolTip("在当前设备的所有点表中搜索；选择结果跳转到对应点表和点位")
+        search_bar.addWidget(self.search_results, 1)
+        self.search_count = QLabel()
+        search_bar.addWidget(self.search_count)
+        layout.addLayout(search_bar)
         polling = QHBoxLayout()
         self.poll_interval = spinbox(200, 30000, 1000)
         self.poll_interval.setSuffix(" ms")
@@ -191,9 +218,16 @@ class PointTablePane(QWidget):
         self.poll_button = QPushButton("启动本表轮询")
         self.poll_button.clicked.connect(self._toggle_poll)
         polling.addWidget(self.poll_button)
-        self.stop_all_button = QPushButton("停止全部轮询")
+        self.stop_all_button = QPushButton("停止全部采集")
         self.stop_all_button.clicked.connect(self.stop_all)
         polling.addWidget(self.stop_all_button)
+        self.subscribe_button = QPushButton("订阅本表")
+        self.subscribe_button.clicked.connect(self._subscribe)
+        self.queue_size = spinbox(1, 1000, 10)
+        self.queue_size.setPrefix("队列 ")
+        self.queue_size.setToolTip("每个 MonitoredItem 的队列长度；丢弃最旧通知，显示修订参数与溢出标志")
+        polling.addWidget(self.subscribe_button)
+        polling.addWidget(self.queue_size)
         polling.addStretch()
         self.schedule_status = QLabel()
         layout.addLayout(polling)
@@ -209,11 +243,25 @@ class PointTablePane(QWidget):
         self._button(toolbar, "读取整表", self._read).setObjectName("primary")
         self._button(toolbar, "写入点位…", self._write).setObjectName("write")
         layout.addLayout(toolbar)
-        self.rows = Rows(("名称", "地址 / 类型", "原始值", "工程值", "单位", "最后采样", "质量", "最后成功", "说明", "二进制"), self._row, (2, 3), (9,))
+        self.rows = Rows(("名称", "地址 / 类型", "原始值", "工程值", "单位", "最后采样", "质量", "最后成功", "功能描述", "二进制", "协议状态 / 时间戳"), self._row, (2, 3), (9,))
         self.rows.setParent(self)
         self.point_table = _table(self.rows)
+        configure_point_reordering(self.point_table, self._move_point)
         self.point_table.setAccessibleName("命名点位")
-        layout.addWidget(self.point_table, 1)
+        self.point_table.horizontalHeader().setSectionResizeMode(8, QHeaderView.ResizeMode.Interactive)
+        self.point_table.setColumnWidth(8, 240)
+        self.point_table.setMinimumHeight(150)
+        self.point_description = QPlainTextEdit()
+        self.point_description.setReadOnly(True)
+        self.point_description.setAccessibleName("所选点位功能描述")
+        self.point_description.setPlaceholderText("选择点位，查看用途、取值含义和操作注意事项。双击点位可编辑。")
+        self.point_description.setMinimumWidth(180)
+        self.point_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.point_splitter.setChildrenCollapsible(False)
+        self.point_splitter.addWidget(self.point_table)
+        self.point_splitter.addWidget(self.point_description)
+        self.point_splitter.setSizes([760, 300])
+        layout.addWidget(self.point_splitter, 1)
         self.empty = QLabel()
         self.empty.setObjectName("resultContext")
         layout.addWidget(self.empty)
@@ -223,7 +271,7 @@ class PointTablePane(QWidget):
         self.feedback.setWordWrap(True)
         layout.addWidget(self.feedback)
         footer = QHBoxLayout()
-        hint = QLabel("工程值 = 原始值 × 倍率 + 偏置；可按表独立轮询，写入使用原始值。")
+        hint = QLabel("拖动左侧行号调整点位顺序。工程值 = 原始值 × 倍率 + 偏置；写入使用原始值。")
         hint.setWordWrap(True)
         footer.addWidget(hint, 1)
         self.bit_button = QPushButton("位查看…")
@@ -234,6 +282,8 @@ class PointTablePane(QWidget):
         footer.addWidget(self.save_device_button)
         layout.addLayout(footer)
         self.tables.currentIndexChanged.connect(self._show_points)
+        self.search.textChanged.connect(self._search_changed)
+        self.search_results.activated.connect(self._locate_point)
         self.point_table.selectionModel().currentRowChanged.connect(lambda *_: self._buttons())
         self.point_table.doubleClicked.connect(lambda *_: self._edit_point())
         self.poll_interval.valueChanged.connect(self._settings_changed)
@@ -279,7 +329,10 @@ class PointTablePane(QWidget):
         if table and (table.id, point.id) in self._pending:
             outcome = "等待读取"
         bits = binary_text(sample.raw_value, target_kind(point.target)) if sample else "—"
-        return point.name, point.target.label, raw, engineering, point.unit, time, outcome, success, point.description, bits
+        native = sample.detail if sample and sample.detail else sample.metadata.summary if sample and sample.metadata else "—"
+        if sample and sample.changed_at:
+            native += f" · 最后值变化 {sample.changed_at:%H:%M:%S}"
+        return point.name, point.target.label, raw, engineering, point.unit, time, outcome, success, point.description, bits, native
 
     def _bit_reading(self):
         point, table = self.point, self.table
@@ -292,7 +345,7 @@ class PointTablePane(QWidget):
             context += f"；原始值：{sample.raw_value}"
             if sample.last_success_at:
                 context += f"；最后成功：{sample.last_success_at:%H:%M:%S}"
-        return BitReading(point.name, pattern, context)
+        return BitReading(point.name, pattern, context, point.bit_definitions, target_kind(point.target))
 
     def refresh(self, state, closing=False):
         self.state, self.closing = state, closing
@@ -317,6 +370,7 @@ class PointTablePane(QWidget):
                     self.tables.addItem(table.name, table.id)
                 self.tables.setCurrentIndex(max(0, self.tables.findData(selected)))
             self._show_points()
+            self._search_changed()
         if device:
             text = device.profile.endpoint
             if not self._embedded and device.name != text:
@@ -330,14 +384,26 @@ class PointTablePane(QWidget):
         self._pending = pending
         groups = len(state.polling_groups) + int(state.polling)
         full = " · 队列已满" if state.queued >= state.queue_capacity else ""
-        self.schedule_status.setText(f"轮询 {groups} 组 · 手动任务 {state.queued}/{state.queue_capacity}{full}")
+        self.schedule_status.setText(f"轮询 {groups} 组 · 订阅 {len(state.subscription_groups)} 表 · 手动任务 {state.queued}/{state.queue_capacity}{full}")
+        health = self.samples.subscription_health.get(self.table.id) if self.table else None
+        if health and self.table.id in state.subscription_groups:
+            last = health.last_notification_at.strftime("%H:%M:%S") if health.last_notification_at else "尚无值通知"
+            self.schedule_status.setText(self.schedule_status.text() + f" · {health.detail} · 最后值通知 {last}")
+        if state.recovering_tables:
+            self.schedule_status.setText(self.schedule_status.text() + f" · 待恢复 {len(state.recovering_tables)} 组")
         self._buttons()
 
     def _buttons(self):
         table, point = self.table, self.point
+        description = f"{point.name} · {point.target.label}\n{point.description or '尚未定义功能描述，双击点位可补充。'}" if point else ""
+        if self.point_description.toPlainText() != description:
+            self.point_description.setPlainText(description)
         available = self._context is not None and not getattr(self, "closing", False)
-        active = table is not None and table.id in self.state.polling_groups
+        subscribed = table is not None and table.id in self.state.subscription_groups
+        active = table is not None and (table.id in self.state.polling_groups or subscribed or table.id in self.state.recovering_tables)
         editable = available and not active and (table is None or table.id not in self.state.manual_tables)
+        set_point_reordering_enabled(self.point_table, editable and table is not None and not self.search.text().strip(),
+                                     "清空搜索并停止本表采集后，可拖动左侧行号排序。")
         for name, button in self.actions.items():
             button.setEnabled(editable and (name in ("新建点表", "导入…") or table is not None))
         for name in ("编辑点位", "删除点位"):
@@ -357,8 +423,27 @@ class PointTablePane(QWidget):
         self.poll_button.setText("停止本表轮询" if active else "启动本表轮询")
         self.poll_button.setEnabled(available and self.state.connection == ConnectionState.ONLINE and table is not None
                                     and bool(table.points) and table.id not in self.state.manual_tables)
-        self.stop_all_button.setEnabled(self.state.connection == ConnectionState.ONLINE
-                                        and (self.state.polling or bool(self.state.polling_groups)))
+        self.stop_all_button.setEnabled(not getattr(self, "closing", False) and
+                                        (self.state.polling or bool(self.state.polling_groups) or bool(self.state.subscription_groups)
+                                         or bool(self.state.recovering_tables)))
+        opcua = self._context is not None and self._context.profile.protocol == "opcua"
+        self.subscribe_button.setVisible(opcua)
+        self.queue_size.setVisible(opcua)
+        self.subscribe_button.setText("停止本表订阅" if subscribed else "订阅本表")
+        self.subscribe_button.setEnabled(idle and table is not None and bool(table.points))
+        self.queue_size.setEnabled(not subscribed)
+        if subscribed:
+            self.poll_button.setText("切换为轮询")
+
+    def _move_point(self, source, destination):
+        if not self.point_table.verticalHeader().sectionsMovable() or self.table is None:
+            return
+        points = reordered_points(self.table.points, self.rows.items, source, destination)
+        if points == self.table.points:
+            return
+        selected = self.rows.items[source]
+        self._apply(replace(self.table, points=points))
+        self.point_table.selectRow(self.rows.items.index(selected))
 
     def _show_points(self, *_args, keep_selection=False):
         selected = self.point.id if keep_selection and self.point else None
@@ -375,9 +460,52 @@ class PointTablePane(QWidget):
             if index is not None:
                 self.point_table.selectRow(index)
         self._buttons()
+        self._filter_points()
         self.workspace_changed.emit()
 
+    def _search_changed(self, *_args):
+        query = self.search.text().strip()
+        with QSignalBlocker(self.search_results):
+            self.search_results.clear()
+            if query:
+                for table in self._tables:
+                    for point in table.points:
+                        if _matches(point, query):
+                            self.search_results.addItem(f"{table.name} / {point.name} · {point.target.label}", (table.id, point.id))
+            self.search_results.setPlaceholderText(f"定位设备内结果（{self.search_results.count()}）")
+            self.search_results.setCurrentIndex(-1)
+        self.search_results.setVisible(bool(query))
+        self._filter_points()
+
+    def _filter_points(self):
+        query = self.search.text().strip()
+        visible = 0
+        selected = self.point
+        for row, point in enumerate(self.rows.items):
+            match = _matches(point, query)
+            self.point_table.setRowHidden(row, not match)
+            visible += int(match)
+        if selected and not _matches(selected, query):
+            self.point_table.clearSelection()
+            self.point_table.setCurrentIndex(self.rows.index(-1, -1))
+        self.search_count.setText(f"本表 {visible}/{len(self.rows.items)}")
+        self._buttons()
+
+    def _locate_point(self, index):
+        result = self.search_results.itemData(index)
+        if result is None:
+            return
+        table_id, point_id = result
+        self.tables.setCurrentIndex(self.tables.findData(table_id))
+        row = next((row for row, point in enumerate(self.rows.items) if point.id == point_id), None)
+        if row is not None:
+            self.point_table.selectRow(row)
+            self.point_table.scrollTo(self.rows.index(row, 0))
+            self.point_table.setFocus()
+
     def _apply(self, table):
+        if self.subscribe_table is not None and self._context is not None and self._context.profile.protocol == "opcua":
+            self.subscribe_table(table, False, self.queue_size.value())
         self.workspace.project = self.workspace.project.with_table(table)
         self.feedback.clear()
         self.refresh(self.state)
@@ -410,6 +538,8 @@ class PointTablePane(QWidget):
                                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                                QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
             table_id = self.table.id
+            if self.subscribe_table is not None and self._context.profile.protocol == "opcua":
+                self.subscribe_table(self.table, False, self.queue_size.value())
             self.workspace.project = self.workspace.project.without_table(table_id)
             self.refresh(self.state)
 
@@ -510,6 +640,10 @@ class PointTablePane(QWidget):
     def _toggle_poll(self):
         if self.table:
             self.poll_table(self.table, self.table.id not in self.state.polling_groups)
+
+    def _subscribe(self):
+        if self.table is not None and self.subscribe_table is not None:
+            self.subscribe_table(self.table, self.table.id not in self.state.subscription_groups, self.queue_size.value())
 
     def _flush_values(self):
         self._dirty.update(self.samples.expire())

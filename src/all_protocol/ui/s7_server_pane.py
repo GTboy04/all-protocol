@@ -8,9 +8,11 @@ from ..adapters.s7.server_model import S7Memory, S7ServerPlan, S7ServerPoint, S7
 from ..application.server_contracts import ListenerState, RequestMetadata, ServerEvent
 from .main_window import Rows, _heading, _panel, _table
 from .server_pane import ServerPane
-from .widgets import EditDialog, spinbox
+from .widgets import (EditDialog, configure_point_reordering, point_sort_picker,
+                      reordered_points, set_point_reordering_enabled, spinbox)
 from ..application.binary import bit_pattern
 from .bit_inspector import BitReading, show_bit_inspector
+from .bit_definitions_editor import BitDefinitionsEditor
 
 
 AREAS = ((Area.DB, "DB 数据块"), (Area.M, "M 标志"), (Area.I, "I 输入"), (Area.Q, "Q 输出"))
@@ -62,9 +64,13 @@ class S7ServerPane(ServerPane):
             self.area_filter.addItem(caption, area.value)
         toolbar.addWidget(self.area_filter)
         toolbar.addStretch()
+        toolbar.addWidget(QLabel("排序"))
+        self.point_sort = point_sort_picker()
+        toolbar.addWidget(self.point_sort)
         layout.addLayout(toolbar)
         self.points = Rows(("绝对地址", "名称", "类型", "初始值", "当前值"), self._point_row, (3, 4), (0, 3, 4))
         self.point_table = _table(self.points)
+        configure_point_reordering(self.point_table, self._move_point)
         self.point_table.setAccessibleName("S7 点位")
         self.point_table.horizontalHeader().setStretchLastSection(False)
         self.point_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -88,6 +94,7 @@ class S7ServerPane(ServerPane):
         body.addWidget(splitter, 1)
         self.point_table.selectionModel().currentRowChanged.connect(self._refresh)
         self.area_filter.currentIndexChanged.connect(self._show_points)
+        self.point_sort.currentIndexChanged.connect(self._sort_changed)
 
     def _load_points(self, plan):
         self._points = plan.points
@@ -111,11 +118,31 @@ class S7ServerPane(ServerPane):
 
     def _show_points(self, *_):
         area = self.area_filter.currentData()
-        visible = (point for point in self._points if area is None or point.target.area == area)
-        self.points.reset(sorted(visible, key=lambda point: (
-            point.target.area != Area.DB, point.target.area, point.target.db, point.target.offset, point.target.bit,
-        )))
+        visible = tuple(point for point in self._points if area is None or point.target.area == area)
+        mode = self.point_sort.currentData()
+        if mode != "created":
+            visible = tuple(sorted(visible, key=lambda point: (
+                point.target.area != Area.DB, point.target.area, point.target.db, point.target.offset, point.target.bit,
+            ), reverse=mode == "address_desc"))
+        self.points.reset(visible)
         self._refresh()
+
+    def _move_point(self, source, destination):
+        if not self.point_table.verticalHeader().sectionsMovable():
+            return
+        points = reordered_points(self._points, self.points.items, source, destination)
+        if points == self._points:
+            return
+        selected = self.points.items[source]
+        self._points = points
+        self._show_points()
+        self.point_table.selectRow(self.points.items.index(selected))
+
+    def _sort_changed(self, *_):
+        selected = self._point
+        self._show_points()
+        if selected is not None and selected in self.points.items:
+            self.point_table.selectRow(self.points.items.index(selected))
 
     def _point_row(self, point):
         target = point.target
@@ -130,7 +157,8 @@ class S7ServerPane(ServerPane):
         value = self._memory.current(point) if running and self._memory is not None else point.initial
         label = f"{point.target.address()} · {point.name}"
         return BitReading(label, bit_pattern(value, str(point.target.data_type)),
-                          f"{'当前值' if running else '配置初始值（服务已停止）'}：{value}")
+                          f"{'当前值' if running else '配置初始值（服务已停止）'}：{value}",
+                          point.bit_definitions, str(point.target.data_type))
 
     def _edit_point(self, original):
         default_area = Area(self.area_filter.currentData() or Area.DB)
@@ -144,6 +172,7 @@ class S7ServerPane(ServerPane):
         for value in DataType:
             data_type.addItem(value.value, value.value)
         data_type.setCurrentIndex(data_type.findData(target.data_type.value))
+        bit_definitions = BitDefinitionsEditor(lambda: str(data_type.currentData()), original.bit_definitions if original else ())
         offset = spinbox(0, MAX_OFFSET, target.offset)
         bit = spinbox(0, 7, target.bit)
         name = QLineEdit(original.name if original else "")
@@ -166,7 +195,7 @@ class S7ServerPane(ServerPane):
         def commit():
             selection = selected()
             point = S7ServerPoint(selection, _parse_value(selection.data_type, initial.text()), name.text().strip(),
-                                  original.simulation if original else None)
+                                  original.simulation if original else None, bit_definitions.definitions)
             if original is None:
                 points = self._points + (point,)
             else:
@@ -182,6 +211,7 @@ class S7ServerPane(ServerPane):
         for label, field in (
             ("数据区", area), ("DB 号", db), ("数据类型", data_type), ("字节偏移（0 基）", offset),
             ("位索引", bit), ("绝对地址", address), ("名称（可选）", name), ("初始值", initial),
+            ("逐位定义", bit_definitions),
         ):
             dialog.form.addRow(label, field)
         for picker in (area, data_type):
@@ -228,6 +258,8 @@ class S7ServerPane(ServerPane):
 
     def _refresh(self, *_):
         idle, running = self._refresh_listener()
+        set_point_reordering_enabled(self.point_table, idle and self.point_sort.currentData() == "created",
+                                     "停止服务并选择「自定义顺序」后，可拖动左侧行号排序。")
         selected = self._point is not None
         self.add_point.setEnabled(idle)
         self.edit_point.setEnabled(idle and selected)

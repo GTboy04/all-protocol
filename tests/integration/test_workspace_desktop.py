@@ -217,9 +217,11 @@ def test_quick_write_evidence_follows_the_original_project_device(workspace):
     window = home.project_window
     client = window.client
     window.resize(780, 620)
-    for _, pane in window.servers.panes():
+    for registration, pane in window.servers.panes():
+        if registration.key not in ("modbus-tcp", "s7"):
+            continue
         pane.listen.click()
-    wait_for(lambda: window.listeners.text() == "监听 2/2")
+    wait_for(lambda: window.listeners.text() == "监听 2/4")
     select(window, "device", "mb")
     client.connect_all_button.click()
     wait_for(lambda: window.connections.text() == "连接 2/2")
@@ -269,16 +271,16 @@ def test_stopping_s7_listener_disconnects_idle_client_and_allows_reconnect(works
     _app, home, _ = workspace
     window = home.project_window
     client = window.client
-    panes = {registration.key: pane for registration, pane in window.servers.panes()}
+    panes = {registration.key: pane for registration, pane in window.servers.panes() if registration.key in ("modbus-tcp", "s7")}
     for pane in panes.values():
         pane.listen.click()
-    wait_for(lambda: window.listeners.text() == "监听 2/2")
+    wait_for(lambda: window.listeners.text() == "监听 2/4")
     select(window, "device", "s7")
     client.connect_all_button.click()
     wait_for(lambda: window.connections.text() == "连接 2/2")
 
     panes["s7"].listen.click()
-    wait_for(lambda: window.listeners.text() == "监听 1/2")
+    wait_for(lambda: window.listeners.text() == "监听 1/4")
     wait_for(lambda: window.connections.text() == "连接 1/2")
     # The online count drops during CLOSING, before socket cleanup completes.
     wait_for(lambda: client.workspace_device_status("s7")[0] == ConnectionState.OFFLINE)
@@ -286,7 +288,7 @@ def test_stopping_s7_listener_disconnects_idle_client_and_allows_reconnect(works
     assert client.workspace_device_status("s7")[0] == ConnectionState.OFFLINE
 
     panes["s7"].listen.click()
-    wait_for(lambda: window.listeners.text() == "监听 2/2")
+    wait_for(lambda: window.listeners.text() == "监听 2/4")
     client.connection_button.click()
     wait_for(lambda: window.connections.text() == "连接 2/2")
 
@@ -296,9 +298,11 @@ def test_project_report_exports_the_preview_snapshot_while_both_devices_poll(wor
     window = home.project_window
     client = window.client
     window.resize(780, 620)
-    for _, pane in window.servers.panes():
+    for registration, pane in window.servers.panes():
+        if registration.key not in ("modbus-tcp", "s7"):
+            continue
         pane.listen.click()
-    wait_for(lambda: window.listeners.text() == "监听 2/2")
+    wait_for(lambda: window.listeners.text() == "监听 2/4")
     select(window, "device", "mb")
     client.connect_all_button.click()
     wait_for(lambda: window.connections.text() == "连接 2/2")
@@ -369,7 +373,7 @@ def test_two_clients_two_listeners_switch_cancel_close_and_restore_without_runni
     app, home, path = workspace
     window = home.project_window
     client = window.client
-    panes = {registration.key: pane for registration, pane in window.servers.panes()}
+    panes = {registration.key: pane for registration, pane in window.servers.panes() if registration.key in ("modbus-tcp", "s7")}
     with socket.socket() as occupied:
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             occupied.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
@@ -386,7 +390,7 @@ def test_two_clients_two_listeners_switch_cancel_close_and_restore_without_runni
         select(window, "server", key)
         assert window.logs.currentWidget() is pane.journal_panel
         pane.listen.click()
-    wait_for(lambda: window.listeners.text() == "监听 2/2")
+    wait_for(lambda: window.listeners.text() == "监听 2/4")
     assert window.error_button.text() == "异常 0"
     select(window, "device", "mb")
     client.connect_all_button.click()
@@ -425,7 +429,7 @@ def test_two_clients_two_listeners_switch_cancel_close_and_restore_without_runni
     QTimer.singleShot(0, cancel_dirty_close)
     assert not window.close()
     wait_for(lambda: sample("mb").request_id > before[0] and sample("s7").request_id > before[1])
-    assert window.connections.text() == "连接 2/2" and window.listeners.text() == "监听 2/2"
+    assert window.connections.text() == "连接 2/2" and window.listeners.text() == "监听 2/4"
     assert home._save_project()
     saved = ProjectFile().open(path)
     assert saved.layout.selection == ("server", "s7") and not saved.layout.journal_visible
@@ -452,7 +456,7 @@ def test_two_clients_two_listeners_switch_cancel_close_and_restore_without_runni
     assert not restored.log_button.isChecked() and restored.logs.isHidden()
     assert abs(restored.navigation.sizes()[0] / sum(restored.navigation.sizes()) * 1000 - saved.layout.navigation) <= 2
     assert restored.server_view.currentIndex() == 1
-    assert restored.connections.text() == "连接 0/2" and restored.listeners.text() == "监听 0/2"
+    assert restored.connections.text() == "连接 0/2" and restored.listeners.text() == "监听 0/4"
     assert all(value.raw_value is None for store in restored.client._sample_stores.values() for value in store.samples.values())
     assert all(restored.client.workspace_device_status(item.id)[0] == ConnectionState.OFFLINE for item in saved.devices)
     assert all(pane.state == ListenerState.STOPPED for _, pane in restored.servers.panes())

@@ -17,9 +17,11 @@ from ..storage import _replace_file
 from .main_window import Rows, _heading, _panel, _table
 from .modbus_tcp_form import order_picker
 from .server_pane import ServerPane
-from .widgets import EditDialog, spinbox
+from .widgets import (EditDialog, configure_point_reordering, point_sort_picker,
+                      reordered_points, set_point_reordering_enabled, spinbox)
 from ..application.binary import bit_pattern
 from .bit_inspector import BitReading, show_bit_inspector
+from .bit_definitions_editor import BitDefinitionsEditor
 
 
 def _display(value):
@@ -56,8 +58,11 @@ def _request_row(event: ServerEvent):
 
 
 class ModbusServerPane(ServerPane):
+    default_plan_type = ServerPlan
+    max_unit_id = 255
+
     def __init__(self, bridge, storage):
-        super().__init__(bridge, storage, ServerPlan())
+        super().__init__(bridge, storage, self.default_plan_type())
         self._current = {}
         self._point_rows = {}
         self._stations = ()
@@ -86,7 +91,13 @@ class ModbusServerPane(ServerPane):
         station_layout.addLayout(copy_actions)
 
         point_panel, point_layout = _panel()
-        point_layout.addWidget(_heading("点位 · 0 基偏移"))
+        point_toolbar = QHBoxLayout()
+        point_toolbar.addWidget(_heading("点位 · 0 基偏移"))
+        point_toolbar.addStretch()
+        point_toolbar.addWidget(QLabel("排序"))
+        self.point_sort = point_sort_picker()
+        point_toolbar.addWidget(self.point_sort)
+        point_layout.addLayout(point_toolbar)
         self.area_tabs = QTabBar()
         for area in Area:
             self.area_tabs.addTab(area.value)
@@ -94,6 +105,7 @@ class ModbusServerPane(ServerPane):
         point_layout.addWidget(self.area_tabs)
         self.points = Rows(("偏移", "名称", "类型", "初始值", "当前值"), self._point_row, (0, 3, 4), (0, 3, 4))
         self.point_table = _table(self.points)
+        configure_point_reordering(self.point_table, self._move_point)
         self.point_table.setAccessibleName("点位")
         self.point_table.horizontalHeader().setStretchLastSection(False)
         self.point_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -133,6 +145,7 @@ class ModbusServerPane(ServerPane):
         body.addWidget(splitter, 1)
         self.station_list.currentRowChanged.connect(self._show_points)
         self.area_tabs.currentChanged.connect(self._show_points)
+        self.point_sort.currentIndexChanged.connect(self._sort_changed)
         self.point_table.selectionModel().currentRowChanged.connect(self._refresh)
 
     def _load_points(self, plan):
@@ -181,11 +194,31 @@ class ModbusServerPane(ServerPane):
 
     def _show_points(self, *_):
         station = self._station
-        points = tuple(sorted((p for p in station.points if p.area == self._area),
-                              key=lambda point: point.offset)) if station else ()
+        points = tuple(p for p in station.points if p.area == self._area) if station else ()
+        mode = self.point_sort.currentData()
+        if mode != "created":
+            points = tuple(sorted(points, key=lambda point: point.offset, reverse=mode == "address_desc"))
         self._point_rows = {address: row for row, point in enumerate(points) for address in point.addresses}
         self.points.reset(points)
         self._refresh()
+
+    def _move_point(self, source, destination):
+        if not self.point_table.verticalHeader().sectionsMovable() or self._station is None:
+            return
+        station = self._station
+        points = reordered_points(station.points, self.points.items, source, destination)
+        if points == station.points:
+            return
+        selected = self.points.items[source]
+        self._stations = tuple(replace(item, points=points) if item is station else item for item in self._stations)
+        self._show_points()
+        self.point_table.selectRow(self.points.items.index(selected))
+
+    def _sort_changed(self, *_):
+        selected = self._point
+        self._show_points()
+        if selected is not None and selected in self.points.items:
+            self.point_table.selectRow(self.points.items.index(selected))
 
     def _point_row(self, point):
         running = self.state in (ListenerState.LISTENING, ListenerState.STOPPING)
@@ -209,13 +242,14 @@ class ModbusServerPane(ServerPane):
         value = self._current_value(point) if running else point.initial
         label = f"Unit {self._station.unit_id} · {point.area}[{point.offset}] · {point.name}"
         return BitReading(label, bit_pattern(value, str(point.value_type)),
-                          f"{'当前值' if running else '配置初始值（服务已停止）'}：{value}")
+                          f"{'当前值' if running else '配置初始值（服务已停止）'}：{value}",
+                          point.bit_definitions, str(point.value_type))
 
     def _edit_station(self, adding):
         original = None if adding else self._station
         used = {station.unit_id for station in self._stations if station is not original}
-        default = original.unit_id if original else next((unit for unit in range(1, 256) if unit not in used), 1)
-        unit_id = spinbox(1, 255, default)
+        default = original.unit_id if original else next((unit for unit in range(1, self.max_unit_id + 1) if unit not in used), 1)
+        unit_id = spinbox(1, self.max_unit_id, default)
         name = QLineEdit(original.name if original else "")
 
         def commit():
@@ -245,7 +279,7 @@ class ModbusServerPane(ServerPane):
         if source is None or self.state != ListenerState.STOPPED:
             return
         used = {station.unit_id for station in self._stations}
-        unit_id = spinbox(1, 255, next((unit for unit in range(1, 256) if unit not in used), 1))
+        unit_id = spinbox(1, self.max_unit_id, next((unit for unit in range(1, self.max_unit_id + 1) if unit not in used), 1))
         name = QLineEdit(source.name + " 副本" if source.name else "")
 
         def commit():
@@ -331,6 +365,8 @@ class ModbusServerPane(ServerPane):
         def selected_type():
             return DataType(types.currentData())
 
+        bit_definitions = BitDefinitionsEditor(lambda: str(selected_type()), original.bit_definitions if original else ())
+
         initial, get_initial = _value_field(
             selected_type(), original.initial if original else 0, lambda text: selected_type().parse(text))
 
@@ -339,6 +375,10 @@ class ModbusServerPane(ServerPane):
             updated = replace(station, points=points).add_points(
                 area, offset.value(), count.value(), get_initial(), "" if batch else name.text().strip(),
                 selected_type(), RegisterOrder(order.currentData()))
+            added = tuple(replace(point, bit_definitions=bit_definitions.definitions)
+                          for point in updated.points[len(points):])
+            updated = replace(updated, points=points + added)
+            updated.validate()
             if original is not None:
                 edited = replace(updated.points[-1], simulation=original.simulation)
                 updated = replace(updated, points=tuple(edited if p is original else p for p in station.points))
@@ -369,6 +409,7 @@ class ModbusServerPane(ServerPane):
         types.currentIndexChanged.connect(show_range)
         show_range()
         dialog.form.addRow("初始值", initial)
+        dialog.form.addRow("逐位定义", bit_definitions)
         dialog.exec()
 
     def _delete_point(self):
@@ -401,8 +442,10 @@ class ModbusServerPane(ServerPane):
             for offset, value in enumerate(event.values, event.offset):
                 self._current[event.unit_id, event.area, offset] = value
             if self._station and self._station.unit_id == event.unit_id and self._area == event.area:
-                self._update_point_cells(self._point_rows[event.offset],
-                                         self._point_rows[event.offset + len(event.values) - 1])
+                rows = {self._point_rows[address] for address in range(event.offset, event.offset + len(event.values))
+                        if address in self._point_rows}
+                if rows:
+                    self._update_point_cells(min(rows), max(rows))
 
     def _update_point_cells(self, first, last):
         if last >= first:
@@ -410,10 +453,12 @@ class ModbusServerPane(ServerPane):
 
     def _refresh(self, *_):
         idle, running = self._refresh_listener()
+        set_point_reordering_enabled(self.point_table, idle and self.point_sort.currentData() == "created",
+                                     "停止服务并选择「自定义顺序」后，可拖动左侧行号排序。")
         self.add_station.setEnabled(idle)
         for control in (self.edit_station, self.remove_station, self.add_point, self.batch_points, self.import_points):
             control.setEnabled(idle and self._station is not None)
-        self.copy_station.setEnabled(idle and self._station is not None and len(self._stations) < 255)
+        self.copy_station.setEnabled(idle and self._station is not None and len(self._stations) < self.max_unit_id)
         self.export_points.setEnabled(self._station is not None)
         for control in (self.edit_point, self.remove_point):
             control.setEnabled(idle and self._point is not None)

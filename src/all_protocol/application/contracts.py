@@ -17,11 +17,13 @@ class ErrorKind(StrEnum):
 
 
 class ClientError(Exception):
-    def __init__(self, kind: ErrorKind, detail: str, code: int | None = None, *, write_rejected: bool = False):
+    def __init__(self, kind: ErrorKind, detail: str, code: int | None = None, *, write_rejected: bool = False,
+                 write_sent: bool | None = None):
         super().__init__(detail)
         self.kind = kind
         self.code = code
         self.write_rejected = write_rejected
+        self.write_sent = write_sent
 
 
 class ConnectionState(StrEnum):
@@ -29,6 +31,7 @@ class ConnectionState(StrEnum):
     CONNECTING = "连接中"
     ONLINE = "已连接"
     CLOSING = "断开中"
+    WAITING = "等待重试"
 
 
 class Target(Protocol):
@@ -70,11 +73,30 @@ class Command:
 
 
 @dataclass(frozen=True, slots=True)
+class ValueMetadata:
+    status_code: int
+    status_name: str
+    quality: str
+    source_timestamp: datetime | None = None
+    server_timestamp: datetime | None = None
+
+    @property
+    def summary(self):
+        parts = [f"{self.quality} · {self.status_name} (0x{self.status_code:08X})"]
+        if self.source_timestamp:
+            parts.append("源 " + self.source_timestamp.isoformat())
+        if self.server_timestamp:
+            parts.append("服务端 " + self.server_timestamp.isoformat())
+        return " · ".join(parts)
+
+
+@dataclass(frozen=True, slots=True)
 class Point:
     address: str
     label: str
     value: Value
     hex_value: str = ""
+    metadata: ValueMetadata | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +112,25 @@ class SessionState:
     manual_tables: tuple[str, ...] = ()
     device_id: str = ""
     session_id: str = ""
+
+    subscription_groups: tuple[str, ...] = ()
+    recovery_attempt: int = 0
+    recovery_limit: int = 0
+    next_retry_at: datetime | None = None
+    recovery_error: str = ""
+    last_communication_at: datetime | None = None
+    recovering_tables: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionHealth:
+    table_id: str
+    generation: int
+    alive: bool
+    last_publish_at: datetime | None
+    last_notification_at: datetime | None
+    max_silence_ms: float
+    detail: str = ""
 
 
 class WriteStatus(StrEnum):
@@ -146,6 +187,7 @@ class JournalEntry:
     generation: int = 0
     write: WriteResult | None = None
     verification: VerificationResult | None = None
+    value_metadata: tuple[ValueMetadata, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

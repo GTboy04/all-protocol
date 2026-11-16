@@ -60,7 +60,7 @@ class DiagnosticRow:
     def from_client(cls, entry: JournalEntry, device_name: str = ""):
         device = (entry.device_id,) if entry.device_id else (entry.protocol, entry.endpoint)
         identity = f"会话 {entry.session_id} / 请求 #{entry.request_id}" if entry.session_id else f"请求 #{entry.request_id}"
-        if entry.protocol == "s7":
+        if entry.protocol in ("s7", "modbus-rtu", "opcua"):
             # S7 may capture one PDU as multiple consecutive COTP frames.
             packets = []
             for sending, data in entry.packets:
@@ -75,7 +75,8 @@ class DiagnosticRow:
         detail = "\n".join(filter(None, (entry.detail, *write_evidence_lines(entry, limit=8))))
         outcome = entry.write.status if entry.write is not None and entry.write.status == WriteStatus.REJECTED else entry.outcome
         return cls(entry.time, entry.protocol, device, source or "—", entry.operation, entry.target, entry.function,
-                   outcome, entry.error, entry.elapsed_ms, identity, detail, tuple(packets))
+                   outcome, entry.error, None if entry.function == "DataChangeNotification" else entry.elapsed_ms,
+                   identity, detail, tuple(packets))
 
     @classmethod
     def from_server(cls, event: ServerEvent):
@@ -86,7 +87,9 @@ class DiagnosticRow:
         details = dict(payload.details)
         code = details.get("function")
         target = details.get("target") or ""
-        if event.protocol == "s7":
+        if event.protocol == "opcua":
+            operation = {"Read": "读取", "Write": "写入"}.get(details.get("service"), "其他")
+        elif event.protocol == "s7":
             operation = {4: "读取", 5: "写入", 0xF0: "连接"}.get(code, "连接" if target == "COTP" else "其他")
         else:
             operation = ("读取" if code in (1, 2, 3, 4) else
@@ -107,7 +110,7 @@ class DiagnosticRow:
                         (("RX", True, payload.rx), ("TX", False, payload.tx)) if data)
         identity = f"监听会话 {payload.session_id} / 请求 #{payload.request_id}" if payload.session_id else ""
         return cls(event.time, event.protocol, (payload.peer,), payload.peer or "—", operation,
-                   target, f"0x{code:02X}" if type(code) is int else "", payload.result,
+                   target, details.get("service", "") if event.protocol == "opcua" else f"0x{code:02X}" if type(code) is int else "", payload.result,
                    error, payload.elapsed_ms, identity, event.endpoint, packets)
 
 
@@ -144,6 +147,7 @@ class RequestStats:
 
 def request_stats(rows) -> RequestStats:
     requests = [row for row in rows if row.operation in ("读取", "写入")
+                and row.function != "DataChangeNotification"
                 and row.error != ErrorKind.INPUT and row.outcome != "已取消（未发送）"]
     times = sorted(row.elapsed_ms for row in requests if row.elapsed_ms is not None)
     return RequestStats(len(requests), sum(row.error is not None for row in requests),

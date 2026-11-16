@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 
 from ..application.contracts import ClientError
 from ..application.session_manager import SessionManager
-from ..project import Project, ProjectFile, ProjectHistory, ProjectServerStorage, ProjectWorkspace, decode_project, project_record
+from ..project import Project, ProjectFile, ProjectHistory, ProjectServerStorage, ProjectWorkspace, decode_project, project_record, project_simulators
 from ..server_protocols import SERVER_PROTOCOLS
 from ..storage import LocalHistory
 from .io_bridge import IoBridge
@@ -168,10 +168,17 @@ class RoleWindow(QWidget):
             try:
                 client = MainWindow(bridge, self._protocols, ProjectHistory(self.workspace, LocalHistory(self._data_dir)),
                                     embedded=True)
-                storages = [(protocol, ProjectServerStorage(self.workspace, protocol.project_field,
-                                                            protocol.create_storage(self._data_dir)))
-                            for protocol in self._server_protocols if protocol.project_field is not None]
-                servers = ServerWorkbench(self._return_home, storages, embedded=True)
+                available = {protocol.registration.key: protocol for protocol in self._server_protocols}
+                def storage_for(item):
+                    protocol = available[item.protocol]
+                    return ProjectServerStorage(self.workspace, protocol.project_field,
+                                                protocol.create_storage(self._data_dir), item)
+                items = project_simulators(self.workspace.project)
+                if self.workspace.project.simulators is None:
+                    items = sorted(items, key=lambda item: list(available).index(item.protocol) if item.protocol in available else len(available))
+                storages = [(available[item.protocol], storage_for(item)) for item in items if item.protocol in available]
+                servers = ServerWorkbench(self._return_home, storages, embedded=True, workspace=self.workspace,
+                                          protocols=available, storage_factory=storage_for)
                 window = ProjectWindow(self.workspace, client, servers, home=self._return_home, save=self._save_project,
                                        confirm_close=lambda parent: self._confirm_workspace_close(parent, opening_project))
             except Exception:

@@ -6,8 +6,13 @@ from PySide6.QtCore import QStandardPaths
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+from all_protocol.adapters.modbus_rtu.client import ModbusRtuClient
+from all_protocol.ui.modbus_rtu_form import ModbusRtuForm
 from all_protocol.adapters.modbus_tcp.client import ModbusTcpClient
 from all_protocol.adapters.s7.client import S7Client
+from all_protocol.adapters.opcua.client import OpcUaClient
+from all_protocol.adapters.opcua.identity import IdentityStore
+from all_protocol.ui.opcua_form import OpcUaForm
 from all_protocol.application.contracts import ProtocolRegistration
 from all_protocol.ui.main_window import DesktopProtocol
 from all_protocol.ui.modbus_tcp_form import ModbusTcpForm
@@ -23,11 +28,16 @@ def main() -> int:
     with as_file(icon) as icon_path:
         app.setWindowIcon(QIcon(str(icon_path)))
     apply_windows_theme(app)
+    data_dir = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation))
+    ua_identities = IdentityStore(data_dir / "AllProtocol/opcua")
     protocols = (
         DesktopProtocol(ProtocolRegistration("modbus-tcp", "Modbus TCP", ModbusTcpClient, True), ModbusTcpForm),
         DesktopProtocol(ProtocolRegistration("s7", "Siemens S7（ISO-on-TCP）", S7Client, True), S7Form),
+        DesktopProtocol(ProtocolRegistration("modbus-rtu", "Modbus RTU", ModbusRtuClient, True), ModbusRtuForm),
+        DesktopProtocol(ProtocolRegistration("opcua", "OPC UA（预览）",
+                                            lambda config, events: OpcUaClient(config, events, ua_identities), True),
+                        lambda: OpcUaForm(ua_identities)),
     )
-    data_dir = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericDataLocation))
     window = RoleWindow(protocols, data_dir / "AllProtocol")
     try:
         window.show()

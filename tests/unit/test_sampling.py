@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from all_protocol.adapters.modbus_tcp.model import Area, ModbusTarget
-from all_protocol.application.contracts import Command, ErrorKind, JournalEntry, Point, ReadUpdate, TableReadUpdate
+from all_protocol.application.contracts import Command, ErrorKind, JournalEntry, Point, ReadUpdate, TableReadUpdate, SubscriptionHealth
 from all_protocol.application.sampling import Quality, SampleStore
 from all_protocol.point_tables import PointDefinition, PointTable
 
@@ -78,3 +78,43 @@ def test_non_finite_response_is_not_a_good_sample():
     store.update(event(point, value=float("nan"), request_id=2))
     assert store.samples["t", "p"].raw_value == 235
     assert store.samples["t", "p"].quality == Quality.PROTOCOL
+
+
+def test_subscription_keepalive_does_not_refresh_value_time_and_silence_expires():
+    store, point, _table, tick = setup()
+    update = event(point)
+    update = replace(update, update=replace(update.update, entry=replace(update.update.entry, function="DataChangeNotification")))
+    store.update(update)
+    initial = store.samples["t", "p"]
+    publish = initial.sampled_at
+    store.update_health(SubscriptionHealth("t", 1, True, publish, publish, 5000, "正常"))
+    tick[0] = 2
+    store.update_health(SubscriptionHealth("t", 1, True, publish + timedelta(seconds=2), publish, 5000, "保活正常"))
+    tick[0] = 4
+    assert not store.expire()  # The unchanged value is still monitored by a live subscription.
+    assert store.samples["t", "p"] == initial  # Keepalive is not a new sample or a value change.
+    tick[0] = 7
+    assert store.expire() == {("t", "p")}
+    assert store.samples["t", "p"].quality == Quality.STALE
+    store.update_health(SubscriptionHealth("t", 1, True, publish + timedelta(seconds=7), publish, 5000, "保活恢复"))
+    assert store.samples["t", "p"].quality == Quality.STALE  # Old data is not relabelled as a fresh value.
+    store.set_generation(2)
+    store.update_health(SubscriptionHealth("t", 1, True, publish, publish, 5000, "旧会话"))
+    assert not store.subscription_health
+
+
+def test_last_value_change_is_independent_of_notification_time_and_stop_removes_health():
+    store, point, _table, tick = setup()
+    store.update(event(point))
+    first = store.samples["t", "p"]
+    store.update(event(point, request_id=2))
+    second = store.samples["t", "p"]
+    assert second.changed_at == first.changed_at and second.sampled_at > first.sampled_at
+    store.update(event(point, value=236, request_id=3))
+    assert store.samples["t", "p"].changed_at > first.changed_at
+    store.update_health(SubscriptionHealth("t", 1, True, first.sampled_at, first.sampled_at, 10000))
+    tick[0] = 4
+    store.expire()
+    assert store.samples["t", "p"].quality == Quality.STALE  # Keepalive cannot extend a polled value's lifetime.
+    store.stop_subscription("t")
+    assert not store.subscription_health

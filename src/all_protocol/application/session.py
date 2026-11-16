@@ -2,7 +2,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from itertools import count
 from math import isclose
 from time import monotonic
@@ -12,9 +12,10 @@ from uuid import uuid4
 from .contracts import (
     Client, ClientError, ClientEvents, Command, ConnectionState, ErrorKind,
     JournalEntry, OperationRejected, Point, ProtocolRegistration, ReadUpdate, SessionState, TableReadUpdate,
-    VerificationOptions, VerificationResult, VerificationStatus, WritableClient, WriteResult, WriteStatus,
+    VerificationOptions, VerificationResult, VerificationStatus, WritableClient, WriteResult, WriteStatus, SubscriptionHealth,
 )
 from .scheduling import RequestScheduler, Work, table_work
+from .recovery import RecoveryPolicy
 
 
 async def wait_for_work(wake, delay):
@@ -49,6 +50,16 @@ class Session:
         self._connection_lost = False
         self._closed = asyncio.Event()
         self._closed.set()
+        self._subscriptions = {}
+        self._subscription_specs = {}
+        self._resume_subscriptions = None
+        self._config = None
+        self._registration = None
+        self._recovery = RecoveryPolicy()
+        self._recovery_task = None
+        self._want_connection = False
+        self._resume_polling = {}
+        self._last_failure = None
 
     def _update(self, **changes):
         self._state = replace(self._state, **changes)
@@ -56,27 +67,42 @@ class Session:
 
     def _entry(self, request_id, operation, target, start, outcome, *,
                function="", error=None, detail="", packets=(), operation_id=None, generation=None,
-               write=None, verification=None):
+               write=None, verification=None, value_metadata=()):
         entry = JournalEntry(request_id, datetime.now(), operation, target, function,
                              round((monotonic() - start) * 1000), outcome, error, detail, packets,
                              protocol=self._protocol, endpoint=self._state.endpoint, operation_id=operation_id,
                              session_id=self._state.session_id,
                              generation=self._generation if generation is None else generation,
-                             write=write, verification=verification)
+                             write=write, verification=verification, value_metadata=value_metadata)
         self._emit(entry)
         return entry
 
-    async def connect(self, protocol: ProtocolRegistration, config: object, endpoint: str):
-        if self._state.connection != ConnectionState.OFFLINE:
+    async def connect(self, protocol: ProtocolRegistration, config: object, endpoint: str, recovery=None):
+        if (self._state.connection != ConnectionState.OFFLINE
+                or self._recovery_task is not None and not self._recovery_task.done()):
             return
+        self._recovery = recovery or RecoveryPolicy()
+        self._registration = protocol
+        self._want_connection = True
+        self._update(recovery_attempt=0, recovery_limit=self._recovery.max_attempts,
+                     recovery_error="", next_retry_at=None)
+        await self._connect_once(protocol, config, endpoint)
+        if self._online():
+            await self._restore_read_tasks()
+        else:
+            self._schedule_recovery(endpoint)
+
+    async def _connect_once(self, protocol, config, endpoint):
         self._generation += 1
         self._closed.clear()
         generation = self._generation
         self._connection_lost = False
         self._protocol = protocol.key
+        self._config = config
         self._writable = protocol.writable
+        self._last_failure = None
         self._update(connection=ConnectionState.CONNECTING, endpoint=endpoint, generation=generation,
-                     session_id=str(uuid4()))
+                     session_id=str(uuid4()), next_retry_at=None)
         # Only the owned handshake task is cancelled by disconnect, not its caller.
         self._task = asyncio.create_task(self._connect(protocol, config, endpoint, generation))
         try:
@@ -98,24 +124,91 @@ class Session:
             raise
         except Exception as error:
             failure = self._failure(error)
+            self._last_failure = failure
             await self._close_client()
             self._entry(request_id, "连接", endpoint, start, failure.kind,
                         error=failure.kind, detail=self._detail(failure), packets=tuple(packets))
-            self._update(connection=ConnectionState.OFFLINE, endpoint="")
+            retry_decision_pending = self._want_connection and self._recovery.enabled
+            self._update(connection=ConnectionState.CONNECTING if retry_decision_pending else ConnectionState.OFFLINE,
+                         endpoint=endpoint if retry_decision_pending else "", recovery_error=self._detail(failure))
             self._closed.set()
         else:
             self._entry(request_id, "连接", endpoint, start, "已连接", packets=tuple(packets))
-            self._update(connection=ConnectionState.ONLINE)
+            self._update(connection=ConnectionState.ONLINE, recovery_error="",
+                         last_communication_at=datetime.now())
         finally:
             self._packets = None
             self._task = None
+
+    def _schedule_recovery(self, endpoint):
+        if not self._want_connection or not self._recovery.enabled:
+            return
+        failure = self._last_failure
+        if failure and (failure.kind not in (ErrorKind.CONNECT, ErrorKind.TIMEOUT, ErrorKind.DISCONNECTED)
+                        or failure.code is not None):
+            self._update(connection=ConnectionState.OFFLINE, endpoint="", next_retry_at=None,
+                         recovery_error=f"恢复停止，请检查配置 · {self._detail(failure)}")
+            return
+        if self._recovery_task is None or self._recovery_task.done():
+            self._update(connection=ConnectionState.WAITING, endpoint=endpoint, recovery_attempt=1,
+                         next_retry_at=datetime.now() + timedelta(seconds=self._recovery.delay(1)))
+            self._recovery_task = asyncio.create_task(self._recover(endpoint))
+
+    async def _recover(self, endpoint):
+        try:
+            for attempt in range(1, self._recovery.max_attempts + 1):
+                delay = self._recovery.delay(attempt)
+                self._update(connection=ConnectionState.WAITING, endpoint=endpoint,
+                             recovery_attempt=attempt, next_retry_at=datetime.now() + timedelta(seconds=delay))
+                await asyncio.sleep(delay)
+                if not self._want_connection:
+                    return
+                await self._connect_once(self._registration, self._config, endpoint)
+                if self._online():
+                    await self._restore_read_tasks()
+                    if self._online():
+                        return
+                failure = self._last_failure
+                if failure and (failure.kind not in (ErrorKind.CONNECT, ErrorKind.TIMEOUT, ErrorKind.DISCONNECTED)
+                                or failure.code is not None):
+                    self._update(connection=ConnectionState.OFFLINE, endpoint="", next_retry_at=None,
+                                 recovery_error=f"恢复停止，请检查配置 · {self._detail(failure)}")
+                    return
+            self._update(connection=ConnectionState.OFFLINE, endpoint="", next_retry_at=None,
+                         recovery_error=f"恢复失败，已达 {self._recovery.max_attempts} 次上限 · {self._state.recovery_error}")
+        finally:
+            self._recovery_task = None
+
+    async def _restore_read_tasks(self):
+        generation = self._generation
+        key = self._protocol, self._state.endpoint, self._config
+        if not self._recovery.restore_reads or self._resume_subscriptions is None or self._resume_subscriptions[0] != key:
+            self._resume_polling.clear()
+            self._resume_subscriptions = None
+            if self._state.recovering_tables:
+                self._update(recovering_tables=())
+            return
+        for table_id in tuple(self._resume_polling):
+            if generation != self._generation or not self._online():
+                return
+            items, interval, stop_on_error = self._resume_polling.pop(table_id)
+            self._start_group(table_id, items, interval, stop_on_error=stop_on_error)
+        specs = self._resume_subscriptions[1]
+        for table_id in tuple(specs):
+            if generation != self._generation or not self._online():
+                return
+            spec = specs.pop(table_id, None)
+            if spec is not None:
+                await self.start_table_subscription(table_id, *spec)
+        self._resume_subscriptions = None
+        self._update(recovering_tables=())
 
     def _packet(self, sending: bool, data: bytes):
         if self._packets is not None:
             self._packets.append((sending, bytes(data)))
 
     def _lost(self, generation: int):
-        if generation == self._generation and self._state.connection == ConnectionState.ONLINE:
+        if generation == self._generation and self._state.connection == ConnectionState.ONLINE and not self._connection_lost:
             self._connection_lost = True
             asyncio.create_task(self.disconnect(unexpected=True))
 
@@ -128,15 +221,37 @@ class Session:
             self._client = None
 
     async def disconnect(self, *, unexpected: bool = False):
+        if not unexpected:
+            self._want_connection = False
+            self._resume_subscriptions = None
+            self._resume_polling.clear()
+            task = self._recovery_task
+            if task is not None and task is not asyncio.current_task():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                if self._recovery_task is task:
+                    self._recovery_task = None
         if self._state.connection == ConnectionState.CLOSING:
             await self._closed.wait()
             return
         if self._state.connection == ConnectionState.OFFLINE:
+            self._update(next_retry_at=None, recovering_tables=(),
+                         **({"recovery_error": "", "recovery_attempt": 0} if not unexpected else {}))
             return
         start = monotonic()
+        self._closed.clear()
         endpoint = self._state.endpoint
+        if unexpected and self._recovery.restore_reads:
+            self._resume_subscriptions = ((self._protocol, endpoint, self._config), dict(self._subscription_specs))
+            self._resume_polling = {key: (group.items, round(group.interval * 1000), group.stop_on_error)
+                                    for key, group in self._scheduler.groups.items()}
+        else:
+            self._resume_subscriptions = None
+            self._resume_polling.clear()
+        self._subscription_specs.clear()
         self._generation += 1
-        self._update(connection=ConnectionState.CLOSING, polling=False, polling_groups=(), generation=self._generation)
+        self._update(connection=ConnectionState.CLOSING, polling=False, polling_groups=(), subscription_groups=(), generation=self._generation)
+        self._subscriptions.clear()
         operations, _groups = self._scheduler.clear()
         for waiter in self._waiters.values():
             waiter.cancel()
@@ -154,11 +269,18 @@ class Session:
         await self._close_client()
         error = ErrorKind.DISCONNECTED if unexpected else None
         self._entry(next(self._ids), "断开", endpoint, start, error or "已断开", error=error,
-                    detail="远端关闭了 TCP 连接或连接已丢失" if unexpected else "")
-        self._update(connection=ConnectionState.OFFLINE, endpoint="", busy=False, queued=0, manual_tables=())
+                    detail="远端关闭了连接或链路已丢失" if unexpected else "")
+        self._update(connection=ConnectionState.OFFLINE, endpoint="", busy=False, queued=0, manual_tables=(),
+                     next_retry_at=None, recovering_tables=tuple(set(self._resume_polling) |
+                         (set(self._resume_subscriptions[1]) if self._resume_subscriptions else set())),
+                     **({"recovery_error": "", "recovery_attempt": 0} if not unexpected else {}))
         self._closed.set()
+        if unexpected:
+            self._last_failure = None
+            self._schedule_recovery(endpoint)
 
     async def stop_polling(self):
+        self._resume_polling.pop("__quick__", None)
         group = self._scheduler.stop_group("__quick__")
         waiter = self._waiters.get(group.id) if group else None
         self._finish_operations()
@@ -201,6 +323,7 @@ class Session:
         return await self._submit(table_work(table_id, commands))
 
     async def start_table_polling(self, table_id, commands, interval_ms):
+        await self.stop_table_subscription(table_id)
         if not table_id or table_id == "__quick__":
             self._reject("轮询", "无效的轮询组标识，轮询未启动", table_id)
             return False
@@ -209,12 +332,18 @@ class Session:
         return self._start_group(table_id, table_work(table_id, commands), interval_ms) is not None
 
     async def stop_table_polling(self, table_id):
+        self._resume_polling.pop(table_id, None)
         self._scheduler.stop_group(table_id)
         self._finish_operations()
         self._sync_schedule()
         self._wake.set()
 
     async def stop_all_polling(self):
+        self._resume_polling.clear()
+        if self._resume_subscriptions is not None:
+            self._resume_subscriptions[1].clear()
+        for table_id in tuple(self._subscriptions):
+            await self.stop_table_subscription(table_id)
         for key in tuple(self._scheduler.groups):
             self._scheduler.stop_group(key)
         self._finish_operations()
@@ -223,6 +352,78 @@ class Session:
 
     def _online(self):
         return self._client is not None and not self._connection_lost and self._state.connection == ConnectionState.ONLINE
+
+    async def start_table_subscription(self, table_id, commands, interval_ms, queue_size=10):
+        commands = tuple(commands)
+        if (not self._online() or not table_id or table_id == "__quick__"
+                or type(interval_ms) is not int or not 200 <= interval_ms <= 30000
+                or type(queue_size) is not int or not 1 <= queue_size <= 1000
+                or not commands or len(commands) > 1000
+                or len(self._subscriptions) >= 64 and table_id not in self._subscriptions
+                or any(command.values is not None for _, command in commands)):
+            return self._reject("订阅", "订阅要求已连接、非空标量点表、200–30000 ms 周期和 1–1000 队列", table_id)
+        subscribe = getattr(self._client, "subscribe", None)
+        if subscribe is None:
+            return self._reject("订阅", "当前协议不支持数据变更订阅", table_id)
+        await self.stop_table_subscription(table_id)
+        await self.stop_table_polling(table_id)
+        generation = self._generation
+        token = object()
+        self._subscriptions[table_id] = (token, None)
+        self._subscription_specs[table_id] = (commands, interval_ms, queue_size)
+
+        def notify(index, point, detail):
+            if (generation != self._generation or not self._online()
+                    or self._subscriptions.get(table_id, (None,))[0] is not token):
+                return
+            point_id, command = commands[index]
+            metadata = (point.metadata,) if point is not None and point.metadata is not None else ()
+            native = "\n".join(item.summary for item in metadata)
+            entry = self._entry(next(self._ids), "读取", command.target.label, monotonic(),
+                                "数据变更" if point is not None else "订阅异常", function="DataChangeNotification",
+                                error=None if point is not None else ErrorKind.RESPONSE,
+                                detail="\n".join(filter(None, (detail, native))), value_metadata=metadata)
+            self._emit(TableReadUpdate(table_id, point_id, ReadUpdate(command, entry, (point,) if point else None, generation)))
+
+        try:
+            subscription = await subscribe(tuple(command.target for _, command in commands), interval_ms, queue_size, notify)
+        except BaseException as error:
+            current = generation == self._generation and self._subscriptions.get(table_id, (None,))[0] is token
+            if current:
+                self._subscriptions.pop(table_id, None)
+                self._subscription_specs.pop(table_id, None)
+                self._update(subscription_groups=tuple(self._subscriptions))
+            if isinstance(error, asyncio.CancelledError):
+                raise
+            if not current:
+                return False
+            self._reject("订阅", str(self._failure(error)), table_id)
+            return False
+        if generation != self._generation or self._subscriptions.get(table_id, (None,))[0] is not token:
+            await subscription.close()
+            return False
+        self._subscriptions[table_id] = (token, subscription)
+        self._update(subscription_groups=tuple(self._subscriptions))
+        def health(alive, published, notified, silence, detail):
+            if generation == self._generation and self._subscriptions.get(table_id, (None,))[0] is token and self._online():
+                if alive and published is not None and (self._state.last_communication_at is None or published > self._state.last_communication_at):
+                    self._update(last_communication_at=published)
+                self._emit(SubscriptionHealth(table_id, generation, alive, published, notified, silence, detail))
+        bind_health = getattr(subscription, "set_health_callback", None)
+        if bind_health is not None:
+            bind_health(health)
+        return True
+
+    async def stop_table_subscription(self, table_id):
+        if self._resume_subscriptions is not None:
+            self._resume_subscriptions[1].pop(table_id, None)
+        previous = self._subscriptions.pop(table_id, None)
+        self._subscription_specs.pop(table_id, None)
+        self._update(subscription_groups=tuple(self._subscriptions))
+        self._emit(SubscriptionHealth(table_id, self._generation, False, None, None, 0, "订阅已停止"))
+        self._sync_schedule()
+        if previous is not None and previous[1] is not None:
+            await previous[1].close()
 
     def _reject(self, operation, detail, table_id=""):
         self._emit(OperationRejected(operation, detail, self._generation, table_id))
@@ -292,6 +493,8 @@ class Session:
                      queued=len(scheduler.operations), queue_capacity=scheduler.capacity,
                      polling="__quick__" in scheduler.groups,
                      polling_groups=tuple(key for key in scheduler.groups if key != "__quick__"),
+                     recovering_tables=tuple(set(self._resume_polling) |
+                         (set(self._resume_subscriptions[1]) if self._resume_subscriptions else set())),
                      manual_tables=tuple(sorted({item.table_id for operation in scheduler.operations.values()
                                                  for item in operation.items if item.table_id})))
 
@@ -379,7 +582,7 @@ class Session:
         observed = tuple(point.value for point in points) if points is not None else ()
         mismatches = ()
         status = VerificationStatus.UNAVAILABLE
-        if compare:
+        if compare and all(point.metadata is None or point.metadata.quality == "Good" for point in points):
             options = write.write.options or VerificationOptions()
 
             def equal(wanted, actual):
@@ -423,7 +626,8 @@ class Session:
                 raise ClientError(ErrorKind.INPUT, "当前协议不支持写入")
         except asyncio.CancelledError:
             canceled = True
-            failure = ClientError(ErrorKind.DISCONNECTED, "连接断开或请求已取消")
+            failure = ClientError(ErrorKind.DISCONNECTED, "连接断开或请求已取消",
+                                  write_sent=getattr(client, "write_sent", None) if command.values is not None else None)
         except Exception as error:
             failure = self._failure(error)
         finally:
@@ -435,7 +639,8 @@ class Session:
                 status = WriteStatus.ACKNOWLEDGED
             elif failure.write_rejected:
                 status = WriteStatus.REJECTED
-            elif failure.kind != ErrorKind.INPUT and any(sending for sending, _ in packets):
+            elif (failure.write_sent is True or failure.write_sent is None
+                  and failure.kind != ErrorKind.INPUT and any(sending for sending, _ in packets)):
                 status = WriteStatus.UNKNOWN
             else:
                 status = WriteStatus.NOT_SENT
@@ -454,10 +659,19 @@ class Session:
             outcome = write.status
         else:
             outcome = failure.kind
+        metadata = tuple(point.metadata for point in (points or ()) if point.metadata is not None)
+        if metadata:
+            detail = "\n".join(item.summary for item in metadata)
+            if any(item.quality != "Good" for item in metadata) and verify_write is None:
+                outcome = "数据质量异常"
+        if failure is None and generation == self._generation:
+            self._update(last_communication_at=datetime.now())
         entry = self._entry(request_id, command.operation, command.target.label, start, outcome,
                             function=function, error=failure.kind if failure else None,
                             detail=detail, packets=tuple(packets), operation_id=operation_id,
-                            generation=generation, write=write, verification=verification)
+                            generation=generation, write=write, verification=verification, value_metadata=metadata)
+        if failure is not None and failure.kind == ErrorKind.DISCONNECTED and not canceled:
+            self._lost(generation)
         if command.values is None and verify_write is None:
             if read_context is None:
                 self._emit(ReadUpdate(command, entry, points if failure is None else None, generation))

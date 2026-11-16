@@ -143,14 +143,14 @@ class _Connection(ServerRequestHandler):
             task.cancel()
         super().connection_lost(exc)
 
-    async def _process(self, rx: bytes):
+    async def _process(self, rx: bytes, *, rtu=False):
         if self.transport is None:
             return
         source = self._peer()
         started = monotonic()
-        transaction = int.from_bytes(rx[:2], "big")
-        unit, function = rx[6:8]
-        pdu = rx[7:]
+        transaction = 0 if rtu else int.from_bytes(rx[:2], "big")
+        unit, function = rx[:2] if rtu else rx[6:8]
+        pdu = rx[1:-2] if rtu else rx[7:]
         offset = int.from_bytes(pdu[1:3], "big") if function in AREAS and len(pdu) >= 3 else None
         count = (1 if function in SINGLE_WRITES else int.from_bytes(pdu[3:5], "big")
                  if function in AREAS and len(pdu) >= 5 else None)

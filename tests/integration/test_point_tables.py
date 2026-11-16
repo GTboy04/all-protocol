@@ -94,6 +94,7 @@ def test_target_decoder_rejects_wrong_protocol_address_and_count():
 def test_project_v1_migrates_in_memory_and_writes_current_version_on_save(tmp_path):
     original = Project("旧项目").remember(profile("modbus-tcp"))
     record = project_record(original)
+    record["servers"].pop("modbus-rtu", None)
     record["schema_version"] = 1
     record.pop("point_tables")
     path = tmp_path / "v1.json"
@@ -106,7 +107,7 @@ def test_project_v1_migrates_in_memory_and_writes_current_version_on_save(tmp_pa
     table = replace(example("modbus-tcp"), device_id=migrated.devices[0].id)
     project = migrated.with_table(table)
     file.save(project, path)
-    assert decode_project_database(path.read_bytes())["schema_version"] == 3
+    assert decode_project_database(path.read_bytes())["schema_version"] == 4
     assert ProjectFile().open(path) == project
 
 
@@ -145,6 +146,7 @@ def test_v2_project_migrates_poll_settings_without_touching_source_until_save(tm
     project = Project("旧点表").remember(profile("modbus-tcp"))
     table = replace(example("modbus-tcp"), device_id=project.devices[0].id)
     record = project_record(project.with_table(table))
+    record["servers"].pop("modbus-rtu", None)
     record["schema_version"] = 2
     for item in record["point_tables"]:
         item.pop("interval_ms")
@@ -158,7 +160,7 @@ def test_v2_project_migrates_poll_settings_without_touching_source_until_save(tm
     assert migrated.point_tables[0].interval_ms == 1000 and migrated.point_tables[0].stale_after_ms == 3000
     changed = migrated.with_table(replace(migrated.point_tables[0], interval_ms=250, stale_after_ms=1500))
     file.save(changed, path)
-    assert decode_project_database(path.read_bytes())["schema_version"] == 3
+    assert decode_project_database(path.read_bytes())["schema_version"] == 4
     assert ProjectFile().open(path) == changed
 
 

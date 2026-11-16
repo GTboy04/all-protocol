@@ -18,6 +18,7 @@ from all_protocol.project import (
     decode_project, project_record,
 )
 from all_protocol.storage import ConnectionProfile, LocalHistory, ServerStorage, S7ServerStorage
+from all_protocol.application.recovery import RecoveryPolicy
 
 
 def modbus_profile(host="192.0.2.1"):
@@ -61,6 +62,27 @@ def test_project_round_trip_is_portable_and_keeps_stable_ids(tmp_path):
         assert connection.execute("SELECT count(*) FROM journal_entries").fetchone()[0] == 0
 
 
+def test_recovery_configuration_round_trips_in_project_and_local_history_without_runtime_state(tmp_path):
+    policy = RecoveryPolicy(True, 500, 3000, 7, True)
+    original = modbus_profile()
+    profile = replace(original, fields={**original.fields, **policy.fields()})
+    project = Project("断线恢复").remember(profile)
+    path = tmp_path / "recovery.allprotocol"
+    ProjectFile().save(project, path)
+    assert ProjectFile().open(path) == project
+    record = decode_project_database(path.read_bytes())
+    assert record["schema_version"] == 6
+    assert "recovery_attempt" not in json.dumps(record)
+    assert "next_retry_at" not in json.dumps(record)
+    local = LocalHistory(tmp_path / "local-recovery")
+    local.remember(profile)
+    assert LocalHistory(tmp_path / "local-recovery").profiles() == (profile,)
+    assert RecoveryPolicy.from_fields(local.profiles()[0].fields) == policy
+    record["schema_version"] = 5
+    with pytest.raises(ValueError, match="v6"):
+        decode_project(record)
+
+
 def test_optional_layout_round_trips_and_damaged_layout_leaves_protocol_configuration_usable(tmp_path):
     project = sample_project()
     layout = WorkspaceLayout(315, 440, False, ("server", "s7"), True, False)
@@ -68,7 +90,7 @@ def test_optional_layout_round_trips_and_damaged_layout_leaves_protocol_configur
     ProjectFile().save(replace(project, layout=layout), path)
     assert ProjectFile().open(path) == replace(project, layout=layout)
     record = decode_project_database(path.read_bytes())
-    assert record["schema_version"] == 3 and record["workspace_layout"]["version"] == 1
+    assert record["schema_version"] == 4 and record["workspace_layout"]["version"] == 1
     for field, value in (("version", 99), ("navigation", -1), ("journal", True),
                          ("selection", ["unknown", "s7"]), ("journal_visible", 1)):
         invalid = deepcopy(record)

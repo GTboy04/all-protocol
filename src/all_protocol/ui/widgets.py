@@ -1,5 +1,5 @@
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog, QDialogButtonBox, QFormLayout, QLabel, QSpinBox, QVBoxLayout
+from PySide6.QtCore import QSignalBlocker, Qt
+from PySide6.QtWidgets import QComboBox, QDialog, QDialogButtonBox, QFormLayout, QLabel, QSpinBox, QVBoxLayout
 
 
 class EditDialog(QDialog):
@@ -34,6 +34,50 @@ class EditDialog(QDialog):
             self.error.setText(str(error))
             return
         super().accept()
+
+
+def point_sort_picker():
+    picker = QComboBox()
+    picker.setAccessibleName("点位排序")
+    for caption, mode in (("自定义顺序", "created"), ("地址升序", "address_asc"), ("地址降序", "address_desc")):
+        picker.addItem(caption, mode)
+    return picker
+
+
+def configure_point_reordering(table, move):
+    """Use Qt's row-header drag gesture, committing moves to the underlying data."""
+    header = table.verticalHeader()
+    header.show()
+    header.setFirstSectionMovable(True)
+    header.setMinimumWidth(36)
+    header.setAccessibleName("拖动行号调整点位顺序")
+
+    def moved(_logical, old, new):
+        # Keep visual and logical row indices identical. The owner then updates
+        # its definitions, so saving, selection and live values use the new order.
+        with QSignalBlocker(header):
+            header.moveSection(new, old)
+        move(old, new)
+
+    header.sectionMoved.connect(moved)
+
+
+def set_point_reordering_enabled(table, enabled, reason=""):
+    header = table.verticalHeader()
+    header.setSectionsMovable(enabled)
+    header.setToolTip("按住左侧行号上下拖动，调整点位顺序；保存项目或方案后保留。" if enabled else reason)
+    header.setCursor(Qt.CursorShape.OpenHandCursor if enabled else Qt.CursorShape.ArrowCursor)
+
+
+def reordered_points(points, visible, source, destination):
+    """Move a visible row while keeping filtered-out definitions in their slots."""
+    if source == destination or not (0 <= source < len(visible) and 0 <= destination < len(visible)):
+        return tuple(points)
+    ordered = list(visible)
+    ordered.insert(destination, ordered.pop(source))
+    visible_ids = {id(point) for point in visible}
+    remaining = iter(ordered)
+    return tuple(next(remaining) if id(point) in visible_ids else point for point in points)
 
 
 def spinbox(minimum, maximum, value):

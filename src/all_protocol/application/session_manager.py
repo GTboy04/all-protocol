@@ -68,7 +68,7 @@ class SessionManager:
             self.emit(DeviceEvent(device_id, "", 0, "", SessionState(device_id=device_id or "")))
         return False
 
-    async def connect(self, device_id, protocol, config, endpoint):
+    async def connect(self, device_id, protocol, config, endpoint, recovery=None):
         if not device_id or self._closing or self._disconnecting:
             return self._reject(device_id, "正在清理连接，连接请求未执行")
         runtime = self.devices.get(device_id)
@@ -92,7 +92,7 @@ class SessionManager:
         runtime.session_id = str(uuid4())
         runtime.last_error = ""
         try:
-            await runtime.session.connect(protocol, config, endpoint)
+            await runtime.session.connect(protocol, config, endpoint, recovery)
         except asyncio.CancelledError:
             runtime.last_error = "连接已取消"
             return False
@@ -106,7 +106,7 @@ class SessionManager:
 
     async def call(self, device_id, method, *args):
         if method not in {"execute", "verify_write", "execute_table", "start_table_polling",
-                          "stop_table_polling", "stop_polling", "stop_all_polling"}:
+                          "stop_table_polling", "stop_polling", "stop_all_polling", "start_table_subscription", "stop_table_subscription"}:
             raise ValueError("不支持的设备操作")
         runtime = self.devices.get(device_id)
         if runtime is None or runtime.retiring or self._closing or self._disconnecting:
@@ -117,9 +117,9 @@ class SessionManager:
 
     async def connect_all(self, specifications):
         async def one(spec):
-            device_id, protocol, config, endpoint = spec
+            device_id, protocol, config, endpoint, *options = spec
             try:
-                success = await self.connect(device_id, protocol, config, endpoint)
+                success = await self.connect(device_id, protocol, config, endpoint, *options)
                 runtime = self.devices.get(device_id)
                 return DeviceResult(device_id, success, runtime.last_error if runtime else "设备不可用")
             except Exception as error:
@@ -172,8 +172,8 @@ class DeviceSession:
     def __init__(self, manager, device_id):
         self.manager, self.device_id = manager, device_id
 
-    async def connect(self, protocol, config, endpoint):
-        return await self.manager.connect(self.device_id, protocol, config, endpoint)
+    async def connect(self, protocol, config, endpoint, recovery=None):
+        return await self.manager.connect(self.device_id, protocol, config, endpoint, recovery)
 
     async def disconnect(self):
         return await self.manager.disconnect(self.device_id)
@@ -192,6 +192,12 @@ class DeviceSession:
 
     async def stop_table_polling(self, table_id):
         return await self.manager.call(self.device_id, "stop_table_polling", table_id)
+
+    async def start_table_subscription(self, table_id, commands, interval_ms, queue_size=10):
+        return await self.manager.call(self.device_id, "start_table_subscription", table_id, commands, interval_ms, queue_size)
+
+    async def stop_table_subscription(self, table_id):
+        return await self.manager.call(self.device_id, "stop_table_subscription", table_id)
 
     async def stop_polling(self):
         return await self.manager.call(self.device_id, "stop_polling")

@@ -223,11 +223,72 @@ def decode_packet(protocol: str, data: bytes, *, request: bool) -> list[PacketFi
             raise ParseError(0, "空报文")
         if protocol == "modbus-tcp":
             _modbus(data, request, fields)
+        elif protocol == "modbus-rtu":
+            _rtu(data, request, fields)
         elif protocol == "s7":
             _s7(data, fields)
+        elif protocol == "opcua":
+            _opcua(data, fields)
         else:
             fields.append(PacketField("原始字节", spans=((0, len(data)),)))
     except ParseError as error:
         spans = ((error.offset, error.offset + 1),) if error.offset < len(data) else ()
         fields.append(PacketField("解析失败", f"偏移 {error.offset} · {error}", spans))
     return fields
+
+
+def _opcua(data, fields):
+    offset = 0
+    while offset < len(data):
+        if len(data) - offset < 8:
+            raise ParseError(len(data), "UA TCP 头残缺，需 8 字节")
+        kind = data[offset:offset + 3]
+        chunk = data[offset + 3:offset + 4]
+        size = int.from_bytes(data[offset + 4:offset + 8], "little")
+        frame = PacketField("OPC UA TCP", spans=((offset, min(len(data), offset + max(8, size))),))
+        fields.append(frame)
+        frame.children.extend([
+            PacketField("消息类型", kind.decode("ascii", errors="replace"), ((offset, offset + 3),)),
+            PacketField("分块", chunk.decode("ascii", errors="replace"), ((offset + 3, offset + 4),)),
+            PacketField("消息长度（小端）", str(size), ((offset + 4, offset + 8),)),
+        ])
+        if kind not in (b"HEL", b"ACK", b"ERR", b"RHE", b"OPN", b"MSG", b"CLO") or chunk not in (b"F", b"C", b"A"):
+            raise ParseError(offset, "无效 UA TCP 消息类型或分块标记")
+        if size < 8:
+            raise ParseError(offset + 4, "UA TCP 声明长度小于消息头")
+        if size > len(data) - offset:
+            raise ParseError(len(data), "UA TCP 消息短于声明长度")
+        if kind in (b"OPN", b"MSG", b"CLO"):
+            if size < 12:
+                raise ParseError(offset + 8, "安全通道头残缺")
+            frame.children.append(PacketField("安全通道 ID", str(int.from_bytes(data[offset + 8:offset + 12], "little")),
+                                               ((offset + 8, offset + 12),)))
+        frame.children.append(PacketField("UA 二进制 / 安全通道载荷", "服务名、节点及 StatusCode 见请求记录；此处不解密载荷",
+                                           ((offset + 8, offset + size),)))
+        offset += size
+
+
+def _rtu(data, request, fields):
+    from pymodbus.framer.rtu import FramerRTU
+    frame = PacketField("Modbus RTU ADU", spans=((0, len(data)),))
+    fields.append(frame)
+    if len(data) < 4:
+        raise ParseError(len(data), "RTU 帧残缺")
+    body = _Cursor(data[:-2], list(range(len(data) - 2)), frame.children)
+    body.number("站号")
+    code = body.number("功能码", hex_value=True)
+    if not request and code & 0x80:
+        body.number("异常码", hex_value=True)
+    elif code in (1, 2, 3, 4, 5, 6, 15, 16):
+        if request or code in (5, 6, 15, 16):
+            body.number("起始地址", 2)
+            body.number("写入值" if code in (5, 6) else "数量", 2)
+        if (not request and code in (1, 2, 3, 4)) or (request and code in (15, 16)):
+            body.take("数据", body.number("数据字节数"), None)
+    else:
+        body.take("PDU 数据", body.remaining, None)
+    body.finish()
+    crc = int.from_bytes(data[-2:], "big")
+    frame.children.append(PacketField("CRC", data[-2:].hex(" ").upper(), ((len(data)-2, len(data)),)))
+    if not FramerRTU.check_CRC(data[:-2], crc):
+        raise ParseError(len(data)-2, "RTU CRC 校验失败")

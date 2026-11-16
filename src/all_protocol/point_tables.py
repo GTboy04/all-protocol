@@ -9,16 +9,23 @@ import json
 import math
 from uuid import uuid4
 
+from .adapters.modbus_rtu.model import ModbusRtuTarget
 from .adapters.modbus_tcp.model import Area, ModbusTarget
 from .adapters.modbus_tcp.values import DataType, RegisterOrder
 from .adapters.s7.model import Area as S7Area, DataType as S7DataType, S7Target
+from .adapters.opcua.model import UaTarget, UaType
 from .application.contracts import ClientError, Value
+from .application.binary import target_kind
+from .bit_definitions import (BitDefinition, bit_definition_records, decode_bit_definitions,
+                              validate_bit_definitions)
 
 
-type PointTarget = ModbusTarget | S7Target
+type PointTarget = ModbusTarget | S7Target | UaTarget
 CSV_COLUMNS = ("id", "name", "area", "address_offset", "data_type", "unit", "scale", "offset",
-               "precision", "description", "unit_id", "db", "bit", "order")
+               "precision", "description", "unit_id", "db", "bit", "order", "bit_definitions")
 IMPORT_LIMIT_BYTES = 10 * 1024 * 1024
+UA_CSV_COLUMNS = ("id", "name", "namespace_uri", "identifier_type", "identifier", "data_type",
+                  "unit", "scale", "offset", "precision", "description", "bit_definitions")
 
 
 def new_id() -> str:
@@ -31,6 +38,10 @@ def _text(value, label, *, required=False):
 
 
 def target_protocol(target: PointTarget) -> str:
+    if isinstance(target, UaTarget):
+        return "opcua"
+    if isinstance(target, ModbusRtuTarget):
+        return "modbus-rtu"
     if isinstance(target, ModbusTarget):
         return "modbus-tcp"
     if isinstance(target, S7Target):
@@ -39,6 +50,9 @@ def target_protocol(target: PointTarget) -> str:
 
 
 def target_record(target: PointTarget) -> dict:
+    if isinstance(target, UaTarget):
+        return {"namespace_uri": target.namespace_uri, "identifier_type": target.identifier_type,
+                "identifier": target.identifier, "data_type": target.data_type.value, "count": target.count}
     if isinstance(target, ModbusTarget):
         return {"unit_id": target.unit_id, "area": target.area.value, "offset": target.offset,
                 "count": target.count, "data_type": target.value_type.value, "order": target.order.value}
@@ -51,13 +65,24 @@ def target_record(target: PointTarget) -> dict:
 def decode_target(protocol: str, data, *, single=True) -> PointTarget:
     if not isinstance(data, dict):
         raise ValueError("target 必须是对象")
-    integers = ("unit_id", "offset", "count") if protocol == "modbus-tcp" else ("db", "offset", "count", "bit")
+    if protocol == "opcua":
+        try:
+            if set(data) != {"namespace_uri", "identifier_type", "identifier", "data_type", "count"}:
+                raise ValueError("OPC UA 目标字段无效")
+            target = UaTarget(data["namespace_uri"], data["identifier_type"], data["identifier"],
+                              UaType(data["data_type"]), data["count"])
+            target.validate()
+            return target
+        except (ClientError, KeyError, TypeError) as error:
+            raise ValueError(f"无效 OPC UA 目标：{error}") from error
+    integers = ("unit_id", "offset", "count") if protocol in ("modbus-tcp", "modbus-rtu") else ("db", "offset", "count", "bit")
     if any(type(data.get(key)) is not int for key in integers):
         raise ValueError("目标地址、数量和位索引必须是整数")
     try:
-        if protocol == "modbus-tcp":
+        if protocol in ("modbus-tcp", "modbus-rtu"):
             kind = data["data_type"]
-            target = ModbusTarget(data["unit_id"], Area(data["area"]), data["offset"], data["count"],
+            target_type = ModbusRtuTarget if protocol == "modbus-rtu" else ModbusTarget
+            target = target_type(data["unit_id"], Area(data["area"]), data["offset"], data["count"],
                                   DataType(kind) if kind is not None or single else None, RegisterOrder(data["order"]))
         elif protocol == "s7":
             target = S7Target(S7Area[data["area"]], data["db"], data["offset"], S7DataType(data["data_type"]),
@@ -82,6 +107,7 @@ class PointDefinition:
     offset: float = 0.0
     description: str = ""
     precision: int = 3
+    bit_definitions: tuple[BitDefinition, ...] = ()
 
     def __post_init__(self):
         if isinstance(self.target, ModbusTarget) and self.target.data_type is None:
@@ -95,6 +121,7 @@ class PointDefinition:
         if target_protocol(self.target) != protocol:
             raise ValueError("点位协议与设备协议不一致")
         decode_target(protocol, target_record(self.target))
+        validate_bit_definitions(self.bit_definitions, target_kind(self.target))
         for value in (self.scale, self.offset):
             if type(value) not in (int, float):
                 raise ValueError("倍率和偏置必须是有限数值")
@@ -108,6 +135,8 @@ class PointDefinition:
             raise ValueError("显示精度必须为 0–12 的整数")
 
     def engineering_text(self, raw: Value) -> str:
+        if isinstance(self.target, UaTarget) and self.target.data_type == UaType.String:
+            return str(raw)
         # Preserve UInt64 integer precision instead of passing through float.
         if type(raw) not in (int, float, bool):
             raise ValueError("工程值转换仅支持数值")
@@ -134,7 +163,7 @@ class PointDefinition:
         # Rational arithmetic keeps the integer test exact, including UInt64.
         raw = (Fraction(number) - Fraction(Decimal(str(self.offset)))) / Fraction(scale)
         target = self.target
-        floating = target.value_type.floating if isinstance(target, ModbusTarget) else target.data_type == S7DataType.REAL
+        floating = target.value_type.floating if isinstance(target, (ModbusTarget, UaTarget)) else target.data_type == S7DataType.REAL
         if floating:
             try:
                 return float(raw)
@@ -177,8 +206,11 @@ class PointTable:
 
 
 def point_record(point: PointDefinition) -> dict:
-    return {"id": point.id, "name": point.name, "target": target_record(point.target), "unit": point.unit,
+    record = {"id": point.id, "name": point.name, "target": target_record(point.target), "unit": point.unit,
             "scale": point.scale, "offset": point.offset, "description": point.description, "precision": point.precision}
+    if point.bit_definitions:
+        record["bit_definitions"] = bit_definition_records(point.bit_definitions)
+    return record
 
 
 def table_record(table: PointTable) -> dict:
@@ -198,7 +230,8 @@ def decode_table(data, protocol: str) -> PointTable:
                     raise ValueError("点位必须是对象")
                 points.append(PointDefinition(item["id"], item["name"], decode_target(protocol, item["target"]),
                                                item.get("unit", ""), item.get("scale", 1.0), item.get("offset", 0.0),
-                                               item.get("description", ""), item.get("precision", 3)))
+                                               item.get("description", ""), item.get("precision", 3),
+                                               decode_bit_definitions(item.get("bit_definitions", []))))
             except (KeyError, TypeError, ValueError) as error:
                 raise ValueError(f"points[{index}]：{error}") from error
         table = PointTable(data["id"], data["device_id"], data["name"], tuple(points),
@@ -211,7 +244,7 @@ def decode_table(data, protocol: str) -> PointTable:
 
 def export_table_json(table: PointTable, protocol: str) -> str:
     table.validate(protocol)
-    record = {"format": "all-protocol-point-table", "schema_version": 2, "protocol": protocol,
+    record = {"format": "all-protocol-point-table", "schema_version": 3 if any(p.bit_definitions for p in table.points) else 2, "protocol": protocol,
               "table": table_record(table)}
     return json.dumps(record, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
 
@@ -223,11 +256,11 @@ def import_table_json(contents: str, protocol: str, device_id: str) -> PointTabl
     try:
         data = json.loads(contents, parse_constant=reject)
         if (not isinstance(data, dict) or data.get("format") != "all-protocol-point-table"
-                or type(data.get("schema_version")) is not int or data["schema_version"] not in (1, 2)):
+                or type(data.get("schema_version")) is not int or data["schema_version"] not in (1, 2, 3)):
             raise ValueError("无法识别点表格式或版本")
         if data["protocol"] != protocol:
             raise ValueError("导入点表的协议与当前设备不同")
-        if data["schema_version"] == 2 and not {"interval_ms", "stale_after_ms"}.issubset(data["table"]):
+        if data["schema_version"] >= 2 and not {"interval_ms", "stale_after_ms"}.issubset(data["table"]):
             raise ValueError("v2 点表缺少轮询周期或过期时间")
         return decode_table(data["table"], protocol).duplicate(data["table"]["name"], device_id=device_id)
     except (KeyError, TypeError, RecursionError) as error:
@@ -236,13 +269,22 @@ def import_table_json(contents: str, protocol: str, device_id: str) -> PointTabl
 
 def export_points_csv(points: tuple[PointDefinition, ...]) -> str:
     output = io.StringIO(newline="")
-    writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS)
+    opcua = bool(points) and isinstance(points[0].target, UaTarget)
+    writer = csv.DictWriter(output, fieldnames=UA_CSV_COLUMNS if opcua else CSV_COLUMNS)
     writer.writeheader()
     for point in points:
         target = target_record(point.target)
+        bits = json.dumps(bit_definition_records(point.bit_definitions), ensure_ascii=False) if point.bit_definitions else ""
+        if opcua:
+            if not isinstance(point.target, UaTarget):
+                raise ValueError("CSV 不允许混合协议")
+            writer.writerow({"id": point.id, "name": point.name, "unit": point.unit, "scale": point.scale,
+                             "offset": point.offset, "precision": point.precision, "description": point.description, "bit_definitions": bits,
+                             **{key: target[key] for key in ("namespace_uri", "identifier_type", "identifier", "data_type")}})
+            continue
         row = {"id": point.id, "name": point.name, "area": target["area"], "address_offset": target["offset"],
                "data_type": target["data_type"], "unit": point.unit, "scale": point.scale, "offset": point.offset,
-               "precision": point.precision, "description": point.description}
+               "precision": point.precision, "description": point.description, "bit_definitions": bits}
         row.update({key: target[key] for key in ("unit_id", "db", "bit", "order") if key in target})
         writer.writerow(row)
     return output.getvalue()
@@ -253,17 +295,21 @@ def import_points_csv(contents: str, protocol: str, *, fresh_ids=False) -> tuple
     points, ids = [], set()
     try:
         columns = reader.fieldnames
-        required = {"name", "area", "address_offset", "data_type"}
+        opcua = protocol == "opcua"
+        required = {"name", "namespace_uri", "identifier_type", "identifier", "data_type"} if opcua else {"name", "area", "address_offset", "data_type"}
         if (columns is None or len(columns) != len(set(columns)) or not required.issubset(columns)
-                or set(columns) - set(CSV_COLUMNS)):
-            raise ValueError("CSV 表头必须含 name,area,address_offset,data_type，且不能有重复或未知列")
+                or set(columns) - set(UA_CSV_COLUMNS if opcua else CSV_COLUMNS)):
+            raise ValueError("CSV 表头须含 " + ",".join(sorted(required)) + "，且不能有重复或未知列")
         for row in reader:
             try:
                 if None in row or any(value is None for value in row.values()):
                     raise ValueError("列数与表头不一致")
-                target = {"area": row["area"], "offset": int(row["address_offset"]), "count": 1,
-                          "data_type": row["data_type"]}
-                if protocol == "modbus-tcp":
+                target = ({key: row[key] for key in ("namespace_uri", "identifier_type", "identifier", "data_type")}
+                          if opcua else {"area": row["area"], "offset": int(row["address_offset"]), "data_type": row["data_type"]})
+                target["count"] = 1
+                if opcua:
+                    pass
+                elif protocol in ("modbus-tcp", "modbus-rtu"):
                     target.update(unit_id=int(row.get("unit_id") or "1"), order=row.get("order") or "big")
                 else:
                     target.update(db=int(row.get("db") or ("1" if row["area"] == "DB" else "0")),
@@ -271,7 +317,8 @@ def import_points_csv(contents: str, protocol: str, *, fresh_ids=False) -> tuple
                 point = PointDefinition(new_id() if fresh_ids else row.get("id") or new_id(), row["name"],
                                         decode_target(protocol, target), row.get("unit", ""),
                                         float(row.get("scale") or "1"), float(row.get("offset") or "0"),
-                                        row.get("description", ""), int(row.get("precision") or "3"))
+                                        row.get("description", ""), int(row.get("precision") or "3"),
+                                        decode_bit_definitions(json.loads(row.get("bit_definitions") or "[]")))
                 point.validate(protocol)
                 if point.id in ids:
                     raise ValueError("点位 ID 重复")

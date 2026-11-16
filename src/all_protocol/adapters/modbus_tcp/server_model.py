@@ -1,6 +1,7 @@
 from dataclasses import dataclass, replace
 
 from ...application.contracts import Value
+from ...bit_definitions import BitDefinition, validate_bit_definitions
 from ...application.simulation import SimulationPoint, SimulationRule, WriteSpan, compile_rule
 from .model import Area, data_types
 from .values import DataType, RegisterOrder
@@ -22,6 +23,7 @@ class ServerPoint:
     data_type: DataType | None = None
     order: RegisterOrder = RegisterOrder.BIG
     simulation: SimulationRule | None = None
+    bit_definitions: tuple[BitDefinition, ...] = ()
 
     @property
     def value_type(self) -> DataType:
@@ -49,6 +51,7 @@ class ServerPoint:
         if self.addresses[-1] > 65535:
             raise ValueError(f"偏移 {self.addresses[-1]} 超出 0–65535")
         self.encode(self.initial)
+        validate_bit_definitions(self.bit_definitions, str(self.value_type))
 
 
 @dataclass(frozen=True, slots=True)
