@@ -27,6 +27,8 @@ class RtuServerPlan:
         except ClientError as error:
             raise ValueError(str(error)) from error
         ServerPlan(stations=self.stations).validate(starting=starting)
+        if any(station.extensions for station in self.stations):
+            raise ValueError("条件联动和 Python 扩展目前仅支持 Modbus TCP")
         if any(not 1 <= station.unit_id <= 247 for station in self.stations):
             raise ValueError("RTU 站号必须为 1–247")
 

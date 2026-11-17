@@ -63,7 +63,7 @@ def test_serial_adapter_validation_failed_bind_and_restart():
             adapters.append(adapter)
             return adapter
 
-        registration = ServerRegistration("serial-test", "Serial test", create, frozenset(ServerCapability))
+        registration = ServerRegistration("serial-test", "Serial test", create, frozenset({ServerCapability.READ_CURRENT, ServerCapability.WRITE_CURRENT}))
         session = ServerSession(events.append, registration)
         await session.start(SerialPlan(""))
         assert not adapters[-1].bind_started.is_set()

@@ -10,7 +10,8 @@ from ..adapters.modbus_tcp.model import RULES, Area, data_types
 from ..adapters.modbus_tcp.server import ValuesChanged
 from ..adapters.modbus_tcp.server_model import ModbusServerTarget, ServerPlan, Station
 from ..adapters.modbus_tcp.values import DataType, RegisterOrder
-from ..application.server_contracts import ListenerState, RequestMetadata, ServerEvent
+from ..application.scenario_model import ScenarioEvent
+from ..application.server_contracts import ListenerState, ListenerUpdate, RequestMetadata, ServerEvent, StationsChanged
 from ..modbus_points import append_station_points, export_station_points, import_station_points
 from ..point_tables import IMPORT_LIMIT_BYTES
 from ..storage import _replace_file
@@ -48,6 +49,8 @@ def _value_field(data_type, value, parse=None):
 def _request_row(event: ServerEvent):
     time = event.time.strftime("%m-%d %H:%M:%S")
     entry = event.payload
+    if isinstance(entry, ScenarioEvent):
+        return (time, "场景引擎", str(entry.unit_id), "场景", "—", "—", entry.result)
     if not isinstance(entry, RequestMetadata):
         return (time, "—", "—", "—", "—", "—", entry.result)
     details = dict(entry.details)
@@ -60,9 +63,12 @@ def _request_row(event: ServerEvent):
 class ModbusServerPane(ServerPane):
     default_plan_type = ServerPlan
     max_unit_id = 255
+    independent_stations = True
 
     def __init__(self, bridge, storage):
         super().__init__(bridge, storage, self.default_plan_type())
+        self._active_stations = frozenset()
+        self._station_pending = False
         self._current = {}
         self._point_rows = {}
         self._stations = ()
@@ -89,6 +95,11 @@ class ModbusServerPane(ServerPane):
         copy_actions = QHBoxLayout()
         self.copy_station = self._button(copy_actions, "复制从站…", self._copy_station)
         station_layout.addLayout(copy_actions)
+        if self.independent_stations:
+            runtime_actions = QHBoxLayout()
+            self.start_station = self._button(runtime_actions, "启动所选从站", lambda: self._control_station(True))
+            self.stop_station = self._button(runtime_actions, "停止所选从站", lambda: self._control_station(False))
+            station_layout.addLayout(runtime_actions)
 
         point_panel, point_layout = _panel()
         point_toolbar = QHBoxLayout()
@@ -155,6 +166,32 @@ class ModbusServerPane(ServerPane):
     def _plan(self):
         return ServerPlan(self.host.text().strip(), self.port.value(), self._stations)
 
+    def scene_groups(self):
+        return tuple((station.unit_id, f"Unit {station.unit_id} · {station.name}") for station in self._stations)
+
+    def selected_scene_group(self):
+        if self._station is not None:
+            return self._station.unit_id
+        remembered = getattr(self, "_scene_group", None)
+        if any(station.unit_id == remembered for station in self._stations):
+            return remembered
+        return self._station.unit_id if self._station else None
+
+    def remember_scene_group(self, group):
+        self._scene_group = group
+        row = next((i for i, station in enumerate(self._stations) if station.unit_id == group), -1)
+        if row >= 0 and row != self.station_list.currentRow():
+            self.station_list.setCurrentRow(row)
+
+    def set_scenario_extensions(self, unit_id, extensions):
+        if self.state != ListenerState.STOPPED or not self.independent_stations:
+            raise ValueError("请停止 Modbus TCP 服务后配置扩展")
+        stations = tuple(replace(station, extensions=extensions) if station.unit_id == unit_id else station
+                         for station in self._stations)
+        replace(self._plan(), stations=stations).validate()
+        self._stations = stations
+        self._refresh()
+
     def set_simulation_rule(self, target, rule):
         index = self.point_table.currentIndex()
         stations = list(self._stations)
@@ -188,6 +225,7 @@ class ModbusServerPane(ServerPane):
         for station in self._stations:
             label = f"Unit {station.unit_id}  ·  {station.name}" if station.name else f"Unit {station.unit_id}"
             self.station_list.addItem(label)
+        self._station_labels()
         self.station_list.setCurrentRow(min(row, len(self._stations) - 1))
         self.station_list.blockSignals(False)
         self._show_points()
@@ -221,7 +259,7 @@ class ModbusServerPane(ServerPane):
             self.point_table.selectRow(self.points.items.index(selected))
 
     def _point_row(self, point):
-        running = self.state in (ListenerState.LISTENING, ListenerState.STOPPING)
+        running = self._station_running()
         current = self._current_value(point) if running else None
         address = str(point.offset) if len(point.addresses) == 1 else f"{point.offset}–{point.addresses[-1]}"
         return (address, point.name or "—", str(point.value_type),
@@ -238,11 +276,13 @@ class ModbusServerPane(ServerPane):
         point = self._point
         if point is None:
             return None
-        running = self.state in (ListenerState.LISTENING, ListenerState.STOPPING)
+        running = self._station_running()
         value = self._current_value(point) if running else point.initial
         label = f"Unit {self._station.unit_id} · {point.area}[{point.offset}] · {point.name}"
+        stopped = "从站未启动" if self.independent_stations else "服务已停止"
+        source = "当前值" if running else f"配置初始值（{stopped}）"
         return BitReading(label, bit_pattern(value, str(point.value_type)),
-                          f"{'当前值' if running else '配置初始值（服务已停止）'}：{value}",
+                          f"{source}：{value}",
                           point.bit_definitions, str(point.value_type))
 
     def _edit_station(self, adding):
@@ -256,7 +296,10 @@ class ModbusServerPane(ServerPane):
             if unit_id.value() in used:
                 raise ValueError(f"Unit ID {unit_id.value()} 已存在")
             row = len(self._stations) if adding else self.station_list.currentRow()
-            station = Station(unit_id.value(), name.text().strip(), original.points if original else ())
+            station = (replace(original, unit_id=unit_id.value(), name=name.text().strip()) if original
+                       else Station(unit_id.value(), name.text().strip()))
+            if original and original.unit_id != station.unit_id:
+                station = replace(station, extensions=tuple(replace(e, enabled=False, checked_digest="") for e in station.extensions))
             self._stations = self._stations[:row] + (station,) + self._stations[row + 1:]
             self._show_stations(row)
 
@@ -267,7 +310,7 @@ class ModbusServerPane(ServerPane):
 
     def _delete_station(self):
         station = self._station
-        message = f"删除 Unit {station.unit_id} 及其 {len(station.points)} 个点位？"
+        message = f"删除 Unit {station.unit_id} 及其 {len(station.points)} 个点位、{len(station.extensions)} 个扩展？"
         if QMessageBox.question(self, "删除从站", message) != QMessageBox.StandardButton.Yes:
             return
         row = self.station_list.currentRow()
@@ -344,6 +387,7 @@ class ModbusServerPane(ServerPane):
             self._feedback(f"导出失败 · {error}")
 
     def _replace_station(self, station):
+        station.validate()
         row = self.station_list.currentRow()
         self._stations = self._stations[:row] + (station,) + self._stations[row + 1:]
         self._show_points()
@@ -414,7 +458,10 @@ class ModbusServerPane(ServerPane):
 
     def _delete_point(self):
         station, point = self._station, self._point
-        self._replace_station(replace(station, points=tuple(p for p in station.points if p is not point)))
+        try:
+            self._replace_station(replace(station, points=tuple(p for p in station.points if p is not point)))
+        except ValueError as error:
+            self._feedback(f"无法删除点位 · {error}")
 
     def _edit_current(self):
         point, station = self._point, self._station
@@ -433,12 +480,21 @@ class ModbusServerPane(ServerPane):
 
     def _state_changed(self):
         if self.state == ListenerState.STOPPED:
+            self._active_stations = frozenset()
+            self._station_pending = False
             self._current.clear()
+        self._station_labels()
         if self.state in (ListenerState.LISTENING, ListenerState.STOPPED):
             self._update_point_cells(0, len(self.points.items) - 1)
 
     def _runtime_changed(self, event):
-        if isinstance(event, ValuesChanged):
+        if isinstance(event, StationsChanged):
+            self._active_stations = event.active
+            self._station_pending = False
+            self._station_labels()
+            self._update_point_cells(0, len(self.points.items) - 1)
+            self._refresh()
+        elif isinstance(event, ValuesChanged):
             for offset, value in enumerate(event.values, event.offset):
                 self._current[event.unit_id, event.area, offset] = value
             if self._station and self._station.unit_id == event.unit_id and self._area == event.area:
@@ -462,4 +518,44 @@ class ModbusServerPane(ServerPane):
         self.export_points.setEnabled(self._station is not None)
         for control in (self.edit_point, self.remove_point):
             control.setEnabled(idle and self._point is not None)
-        self.edit_value.setEnabled(running and self._point is not None)
+        self.edit_value.setEnabled(running and self._station_running() and self._point is not None)
+        if self.independent_stations:
+            selected = self._station
+            active = selected is not None and selected.unit_id in self._active_stations
+            available = selected is not None and (idle or running) and not self._station_pending
+            self.start_station.setEnabled(available and not active)
+            self.stop_station.setEnabled(available and running and active)
+            self.listen.setText("停止服务" if running or self.state == ListenerState.STOPPING else "启动全部从站")
+
+    def _station_running(self):
+        return (self.state in (ListenerState.LISTENING, ListenerState.STOPPING)
+                and (not self.independent_stations or
+                     self._station is not None and self._station.unit_id in self._active_stations))
+
+    def _station_labels(self):
+        if not self.independent_stations:
+            return
+        for row, station in enumerate(self._stations):
+            label = f"Unit {station.unit_id}"
+            if station.name:
+                label += f"  ·  {station.name}"
+            status = "运行中" if station.unit_id in self._active_stations else "已停止"
+            self.station_list.item(row).setText(f"{label}  ·  {status}")
+
+    def _control_station(self, active):
+        station = self._station
+        if station is None or self._station_pending:
+            return
+        self._feedback("")
+        if self.state == ListenerState.STOPPED and active:
+            self.state = ListenerState.STARTING
+            self.bridge.submit(self.bridge.session.start(self._plan(), stations=frozenset({station.unit_id})))
+        elif self.state == ListenerState.LISTENING:
+            self._station_pending = True
+            self.bridge.submit(self.bridge.session.set_station_active(station.unit_id, active))
+        self._refresh()
+
+    def _handle_event(self, event):
+        if isinstance(event.payload, ListenerUpdate):
+            self._station_pending = False
+        super()._handle_event(event)

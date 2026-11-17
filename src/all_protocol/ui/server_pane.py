@@ -11,6 +11,8 @@ from PySide6.QtWidgets import (
 from ..application.diagnostics import DiagnosticRow
 from ..application.faults import FaultAction, FaultUpdate
 from ..application.journal import LogRetention, RetainedLog
+from ..application.scenario_model import ScenarioEvent
+from ..application.scenario_runtime import ScenarioUpdate
 from ..application.server_contracts import ListenerState, ListenerUpdate, RequestMetadata, RuntimeChange, ServerLifecycle
 from ..application.simulation import SimulationUpdate
 from ..storage import VISIBLE_LOG_ROWS
@@ -25,6 +27,7 @@ from .journal_view import JournalView
 class ServerPane(QWidget):
     listener_changed = Signal()
     simulation_changed = Signal()
+    scenario_changed = Signal()
 
     def __init__(self, bridge, storage, default_plan):
         super().__init__()
@@ -37,6 +40,7 @@ class ServerPane(QWidget):
         self.endpoint = ""
         self.listener_error = ""
         self.simulation_update: SimulationUpdate | None = None
+        self.scenario_update = None
         self.fault_update = FaultUpdate()
         self._diagnostics = None
         self._load_error = False
@@ -48,6 +52,15 @@ class ServerPane(QWidget):
 
     def configuration_plan(self):
         return self._plan()
+
+    def scene_groups(self):
+        return ()
+
+    def selected_scene_group(self):
+        return None
+
+    def remember_scene_group(self, group):
+        pass
 
     def _settings(self):
         panel, layout = _panel()
@@ -65,6 +78,8 @@ class ServerPane(QWidget):
         add_field(controls, "端口", self.port)
         self.listen = self._button(controls, "启动服务", self._toggle_listener)
         self.listen.setObjectName("primary")
+        self.reset_points = self._button(controls, "重置点位", self._reset_points)
+        self.reset_points.setToolTip("将本服务全部点位恢复为配置初始值，并重置场景；已停止从站的点位在下次启动时恢复")
         controls.addWidget(self.status)
         controls.addStretch(1)
         controls.addWidget(self.dirty)
@@ -72,7 +87,7 @@ class ServerPane(QWidget):
         if getattr(self._storage, "project_mode", False):
             self.save.setText("应用到项目")
             self.save.setToolTip("暂存方案；请在首页保存项目文件")
-        for control in (self.listen, self.status, self.dirty, self.save):
+        for control in (self.listen, self.reset_points, self.status, self.dirty, self.save):
             controls.setAlignment(control, Qt.AlignmentFlag.AlignBottom)
         layout.addLayout(controls)
         scene = QHBoxLayout()
@@ -112,6 +127,11 @@ class ServerPane(QWidget):
     def _reset_fault(self):
         self.bridge.submit(self.bridge.session.configure_fault(None))
 
+    def _reset_points(self):
+        if self.state == ListenerState.LISTENING:
+            self._feedback("")
+            self.bridge.submit(self.bridge.session.reset_points())
+
     def _refresh_fault(self):
         update = self.fault_update
         running = self.state == ListenerState.LISTENING
@@ -136,6 +156,8 @@ class ServerPane(QWidget):
                 status += f" · {len(update.faults)} 点异常"
         else:
             configured = next(self._plan().simulation_points(configured_only=True), None)
+            if not configured and getattr(self, "independent_stations", False):
+                configured = any(station.extensions for station in self._plan().stations)
             status = "启动服务后可运行场景" if configured else "场景未配置"
         self.scene_status.setText(status)
 
@@ -153,6 +175,9 @@ class ServerPane(QWidget):
         self.detail.setAccessibleName("RX / TX 报文详情")
         table.selectionModel().currentRowChanged.connect(self._show_request)
         self.journal_view = JournalView(table, self.detail, "服务端 · 请求日志与报文")
+        self.journal_view.clear_requested.connect(self._clear_journal)
+        scope = "当前模拟服务端点" if getattr(self._storage, "project_mode", False) else "当前协议全部服务端"
+        self.journal_view.clear_button.setToolTip(f"清空{scope}日志及本地历史，监听继续运行")
         self.journal_view.actions.insertWidget(0, self.journal_heading)
         diagnostics = QPushButton("请求诊断…")
         diagnostics.clicked.connect(self._open_diagnostics)
@@ -239,10 +264,40 @@ class ServerPane(QWidget):
             self.bridge.submit(session.stop())
         self._refresh()
 
+    def _clear_journal(self):
+        if hasattr(self.bridge, "clear_journal"):
+            self.journal_view.clear_button.setEnabled(False)
+            self.bridge.clear_journal(endpoint=self.endpoint or self.configured_endpoint)
+            return
+        try:
+            scope = dict(endpoint=self.endpoint or self.configured_endpoint) if getattr(self._storage, "project_mode", False) else {}
+            self._storage.clear_log(**scope)
+        except (OSError, ValueError) as error:
+            self._feedback(f"清空日志失败 · {error}")
+            return
+        self._journal_cleared()
+
+    def _journal_cleared(self):
+        self.requests.reset(force=True)
+        self.detail.clear()
+        if self._workspace_log is not None:
+            self._workspace_log.clear()
+        self._log_retention = LogRetention(rotated_at=datetime.now().astimezone())
+        self.journal_view.clear_button.setEnabled(True)
+        if self._diagnostics is not None:
+            self._diagnostics.close()
+        self._feedback("已清空日志，新请求将继续记录。")
+
     def _handle_events(self, batch):
+        if batch.cleared:
+            self._journal_cleared()
+        if batch.clear_error:
+            self.journal_view.clear_button.setEnabled(True)
+            self._feedback(batch.clear_error)
         if batch.rotated:
             self.requests.reset()
-            self.detail.clear()
+            if not self.journal_view.paused:
+                self.detail.clear()
             if self._workspace_log is not None:
                 self._workspace_log.clear()
             self._log_retention = replace(self._log_retention, rotated_at=datetime.now().astimezone(), clipped=False)
@@ -251,7 +306,7 @@ class ServerPane(QWidget):
             self._feedback(batch.error)
         logs = []
         for event in batch.events:
-            if isinstance(event.payload, (RequestMetadata, ServerLifecycle)):
+            if isinstance(event.payload, (RequestMetadata, ServerLifecycle, ScenarioEvent)):
                 logs.append(event)
             else:
                 self._handle_event(event)
@@ -267,6 +322,7 @@ class ServerPane(QWidget):
             previous, self.state = self.state, payload.state
             if self.state == ListenerState.STOPPED:
                 self.simulation_update = None
+                self.scenario_update = None
                 self.fault_update = FaultUpdate()
             self.endpoint = event.endpoint
             self.listener_error = payload.error
@@ -275,11 +331,12 @@ class ServerPane(QWidget):
             if previous != self.state:
                 self._state_changed()
             self._refresh()
-        elif isinstance(payload, (RequestMetadata, ServerLifecycle)):
+        elif isinstance(payload, (RequestMetadata, ServerLifecycle, ScenarioEvent)):
             try:
                 if self._storage.append_event(event):
                     self.requests.reset()
-                    self.detail.clear()
+                    if not self.journal_view.paused:
+                        self.detail.clear()
                     if self._workspace_log is not None:
                         self._workspace_log.clear()
                         self._log_retention = replace(self._log_retention, rotated_at=datetime.now().astimezone(),
@@ -294,6 +351,9 @@ class ServerPane(QWidget):
                 self._workspace_log.append(event)
         elif isinstance(payload, RuntimeChange):
             self._runtime_changed(payload.details)
+        elif isinstance(payload, ScenarioUpdate):
+            self.scenario_update = payload
+            self.scenario_changed.emit()
         elif isinstance(payload, SimulationUpdate):
             self.simulation_update = payload
             self._refresh_simulation()
@@ -341,6 +401,7 @@ class ServerPane(QWidget):
             style.polish(self.status)
         self.listen.setText("停止服务" if running or self.state == ListenerState.STOPPING else "启动服务")
         self.listen.setEnabled(idle or running)
+        self.reset_points.setEnabled(running)
         self.host.setEnabled(idle)
         self.port.setEnabled(idle)
         applied = "已应用到项目" if getattr(self._storage, "project_mode", False) else "已保存"

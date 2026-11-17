@@ -35,6 +35,7 @@
 | R18 · [调度可观测性与性能优化](R18-performance-observability.md) | R3、R4、R8 | 队列与周期指标、固定负载基准、实测优化 | 基线先行、优化按瓶颈推进，计划中 |
 | R19 · [按目标设备扩展协议能力](R19-protocol-selection.md) | R11/R12 软件基线、目标设备与测试条件 | 选择 MQTT、EtherNet/IP 或现有协议补齐中的具体交付项 | 条件驱动，候选规划 |
 | R20 · [点位功能描述与搜索定位](R20-point-definitions.md) | R2、R6 | 多行用途/含义/注意事项、描述查看、设备内跨点表定位 | 用户追加，同 R13 软件已实现 |
+| R21 · [Modbus 场景二次开发与从站配置隔离](R21-scenario-extensions.md) | R5、R7、从站独立启停 | Unit ID 过滤、条件联动、延时序列、Python 定义接口与旧场景共存 | 用户追加，首版已实现，支持表单和 Python 扩展 |
 
 ### 建议实施顺序
 

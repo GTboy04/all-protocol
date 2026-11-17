@@ -492,8 +492,9 @@ def test_simulator_independent_client_scenarios_and_subscriptions(tmp_path):
         point = UaServerPoint(target, 2, "Counter", True,
                               SimulationRule(RuleKind.INCREMENT, period_ms=200, low=2, high=10, step=1))
         plan = UaServerPlan(port=port, points=(point,), security="None/None")
-        registration = ServerRegistration("opcua", "UA", UaServerAdapter, frozenset(ServerCapability),
-                                           lambda plan: plan.simulation_points(configured_only=True))
+        registration = ServerRegistration("opcua", "UA", UaServerAdapter, frozenset({ServerCapability.READ_CURRENT, ServerCapability.WRITE_CURRENT}),
+                                           lambda plan: plan.simulation_points(configured_only=True),
+                                           reset_points=lambda plan: plan.simulation_points())
         events = []
         server = ServerSession(events.append, registration)
         await server.start(plan)
@@ -515,6 +516,10 @@ def test_simulator_independent_client_scenarios_and_subscriptions(tmp_path):
             await until(lambda: notifications)
             await server.write_current(target, 7)
             await until(lambda: any(point and point.value == 7 for point, _ in notifications))
+            await server.reset_points()
+            await until(lambda: any(point and point.value == 2 for point, _ in notifications))
+            assert await server.read_current(target) == 2
+            assert await asyncio.to_thread(node.get_value) == 2
             await server.control_simulation(SimulationCommand.RELEASE, target)
             await server.control_simulation(SimulationCommand.START)
             await until(lambda: any(point and point.value not in (5, 7) for point, _ in notifications))

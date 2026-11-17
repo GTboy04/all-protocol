@@ -7,6 +7,8 @@ from typing import Protocol
 from .contracts import ErrorKind, Value
 from .faults import FaultHit, FaultOperation, FaultUpdate
 from .simulation import SimulationPoint, SimulationUpdate, WriteSpan
+from .scenario_model import PointCommit, ScenarioEvent
+from .scenario_runtime import ScenarioUpdate
 
 
 class ListenerState(StrEnum):
@@ -26,6 +28,7 @@ class LifecycleAction(StrEnum):
     STARTED = "started"
     START_FAILED = "start_failed"
     STOPPED = "stopped"
+    POINTS_RESET = "points_reset"
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,7 +60,7 @@ class ServerEvent:
     protocol: str
     endpoint: str
     time: datetime
-    payload: ListenerUpdate | ServerLifecycle | RequestMetadata | RuntimeChange | SimulationUpdate | FaultUpdate
+    payload: ListenerUpdate | ServerLifecycle | RequestMetadata | RuntimeChange | SimulationUpdate | FaultUpdate | ScenarioEvent | ScenarioUpdate
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +71,12 @@ class ServerCallbacks:
     changed: Callable[[object], None]
     written: Callable[[WriteSpan], None] | None = None
     fault: Callable[[FaultOperation], FaultHit | None] | None = None
+    committed: Callable[[PointCommit], None] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StationsChanged:
+    active: frozenset[int]
 
 
 class ServerAdapter(Protocol):
@@ -84,7 +93,20 @@ class ServerAdapter(Protocol):
     def write_current(self, target: object, value: Value) -> None: ...
 
 
+class StationControlledServerAdapter(ServerAdapter, Protocol):
+    """Optional control of stations sharing a listener, without resetting their values."""
+
+    def configure_stations(self, units: frozenset[int]) -> None: ...
+    def set_station_active(self, unit_id: int, active: bool) -> None: ...
+    def is_target_active(self, target: object) -> bool: ...
+
+
+class ScenarioServerAdapter(ServerAdapter, Protocol):
+    def write_batch(self, values: tuple[tuple[object, Value], ...]) -> None: ...
+
+
 class ServerCapability(StrEnum):
+    STATION_CONTROL = "station_control"
     READ_CURRENT = "read_current"
     WRITE_CURRENT = "write_current"
 
@@ -96,3 +118,5 @@ class ServerRegistration:
     create_adapter: Callable[[object, ServerCallbacks], ServerAdapter]
     capabilities: frozenset[ServerCapability]
     simulation_points: Callable[[object], Iterable[SimulationPoint]] | None = None
+    scenario_bindings: Callable[[object], Iterable[tuple]] | None = None
+    reset_points: Callable[[object], Iterable[SimulationPoint]] | None = None

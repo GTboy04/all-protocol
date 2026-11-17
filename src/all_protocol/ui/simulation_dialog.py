@@ -48,13 +48,18 @@ class SimulationDialog(QDialog):
         layout.addLayout(controls)
 
         form = QFormLayout()
+        self.group = QComboBox()
+        for group, label in pane.scene_groups():
+            self.group.addItem(label, group)
+        self.group.setCurrentIndex(self.group.findData(pane.selected_scene_group()))
+        if pane.scene_groups():
+            form.addRow("当前从站（仅配置范围）", self.group)
+        controls.addWidget(_plain_label("整个模拟服务"))
         self.status = _plain_label()
         form.addRow("场景状态", self.status)
         self.point = QComboBox()
         self.point.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.point.setMinimumContentsLength(18)
-        for point in self._points:
-            self.point.addItem(point.label)
         self.point.setPlaceholderText("请先在方案中添加点位")
         form.addRow("点位", self.point)
         self.rule = _plain_label()
@@ -68,6 +73,12 @@ class SimulationDialog(QDialog):
         self.release = self._button(actions, "恢复自动模拟", lambda: self._send(SimulationCommand.RELEASE))
         actions.addStretch()
         layout.addLayout(actions)
+        self.extensions = None
+        if getattr(pane, "independent_stations", False):
+            from .scenario_extension_editor import ScenarioExtensionsWidget
+            self.extensions = ScenarioExtensionsWidget(pane, self.group.currentData(), self)
+            layout.addWidget(self.extensions)
+            self.resize(800, 650)
         layout.addStretch()
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.button(QDialogButtonBox.StandardButton.Close).setText("关闭")
@@ -77,6 +88,8 @@ class SimulationDialog(QDialog):
         self.point.currentIndexChanged.connect(self.refresh)
         pane.simulation_changed.connect(self.refresh)
         pane.listener_changed.connect(self.refresh)
+        self.group.currentIndexChanged.connect(self._group_changed)
+        self._group_changed()
         self.refresh()
 
     @staticmethod
@@ -87,8 +100,24 @@ class SimulationDialog(QDialog):
         return button
 
     def _selected(self):
-        row = self.point.currentIndex()
-        return self._points[row] if row >= 0 else None
+        target = self.point.currentData()
+        return next((point for point in self._points if point.target == target), None)
+
+    def _group_changed(self):
+        group = self.group.currentData()
+        target = self.point.currentData()
+        self.pane.remember_scene_group(group)
+        self.point.blockSignals(True)
+        self.point.clear()
+        for point in self._points:
+            if self.group.count() == 0 or getattr(point.target, "unit_id", None) == group:
+                self.point.addItem(point.label, point.target)
+        row = self.point.findData(target)
+        self.point.setCurrentIndex(row if row >= 0 else 0 if self.point.count() else -1)
+        self.point.blockSignals(False)
+        if self.extensions is not None:
+            self.extensions.set_unit(group)
+        self.refresh()
 
     def refresh(self):
         update = self.pane.simulation_update
@@ -116,8 +145,10 @@ class SimulationDialog(QDialog):
         self.pane.bridge.submit(self.pane.bridge.session.control_simulation(command, point.target if point else None))
 
     def _set_rule(self, rule):
-        row = self.point.currentIndex()
-        point = self._points[row]
+        point = self._selected()
+        if point is None:
+            return
+        row = self._points.index(point)
         self.pane.set_simulation_rule(point.target, rule)
         self._points[row] = replace(point, rule=rule)
         self.refresh()

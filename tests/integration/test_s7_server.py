@@ -55,6 +55,11 @@ def test_s7_server_typed_memory_and_bit_writes():
             await server.write_current(input_point, 9)
             assert await server.read_current(input_point) == 9
             assert (await client.read(input_point))[0].value == 9
+            await server.reset_points()
+            assert (await client.read(bit_1))[0].value is False
+            assert (await client.read(bit_7))[0].value is True
+            assert (await client.read(word))[0].value == 123
+            assert (await client.read(input_point))[0].value == 8
             with pytest.raises(ClientError) as error:
                 await client.read(replace(word, offset=2))
             assert error.value.kind == ErrorKind.PROTOCOL and error.value.code == 0x05

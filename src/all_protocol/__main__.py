@@ -1,4 +1,9 @@
 import sys
+
+if "--scene-worker" in sys.argv:
+    from all_protocol.scenario_worker import worker_main
+    raise SystemExit(worker_main())
+
 from importlib.resources import as_file, files
 from pathlib import Path
 

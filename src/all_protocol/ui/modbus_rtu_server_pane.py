@@ -7,6 +7,7 @@ from .modbus_rtu_form import SerialConnectionForm
 class ModbusRtuServerPane(ModbusServerPane):
     default_plan_type = RtuServerPlan
     max_unit_id = 247
+    independent_stations = False
 
     def _settings(self):
         # Reuse listener, scenario, faults and point controls with serial settings.
