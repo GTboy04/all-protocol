@@ -207,10 +207,11 @@ class SimulationUpdate:
 
 
 class Simulation:
-    def __init__(self, points: tuple[SimulationPoint, ...], clock, write):
+    def __init__(self, points: tuple[SimulationPoint, ...], clock, write, *, enabled=None):
         self._points = {point.target: point for point in points}
         self._waveforms = {point.target: compile_rule(point, point.rule) for point in points}
         self._clock, self._write = clock, write
+        self._enabled = enabled or (lambda target: True)
         self._last = {}
         self._timeline_next: dict[object, int | None] = {}
         self._held = set()
@@ -226,6 +227,10 @@ class Simulation:
         previous = len(self._held)
         self._held.update(target for target, point in self._points.items() if point.span.overlaps(span))
         return len(self._held) != previous
+
+    def invalidate(self, target):
+        self._last.pop(target, None)
+        self._timeline_next[target] = None
 
     def command(self, command: SimulationCommand, target=None):
         if command == SimulationCommand.START and self.state != SimulationState.RUNNING:
@@ -254,6 +259,10 @@ class Simulation:
         elapsed = round((self._elapsed + (self._clock() - self._started)) * 1_000_000_000) // 1_000_000
         previous = len(self._faults)
         for target, waveform in self._waveforms.items():
+            if not self._enabled(target):
+                self._last.pop(target, None)
+                self._timeline_next[target] = None
+                continue
             if target in self._held or target in self._faults:
                 continue
             try:
@@ -282,6 +291,10 @@ class Simulation:
             self._set_value(target, value)
 
     def _set_value(self, target, value):
+        if not self._enabled(target):
+            self._last.pop(target, None)
+            self._timeline_next[target] = None
+            return
         try:
             self._write(target, value)
         except (ValueError, OverflowError) as error:

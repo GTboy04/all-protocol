@@ -63,6 +63,14 @@ class Rows[T](QAbstractTableModel):
         self.right_aligned = right_aligned
         self.monospace = monospace
         self.items: list[T] = []
+        self._pending_items: list[T] | None = None
+
+    def set_paused(self, paused: bool):
+        if paused and self._pending_items is None:
+            self._pending_items = list(self.items)
+        elif not paused and self._pending_items is not None:
+            items, self._pending_items = self._pending_items, None
+            self.reset(items)
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self.items)
@@ -93,7 +101,11 @@ class Rows[T](QAbstractTableModel):
             return font
         return None
 
-    def reset(self, items: tuple[T, ...] = ()):
+    def reset(self, items: tuple[T, ...] = (), *, force=False):
+        if self._pending_items is not None:
+            self._pending_items = list(items)
+            if not force:
+                return
         self.beginResetModel()
         self.items = list(items)
         self.endResetModel()
@@ -105,6 +117,10 @@ class Rows[T](QAbstractTableModel):
         items = list(items)[:VISIBLE_LOG_ROWS]
         if not items:
             return
+        if self._pending_items is not None:
+            self._pending_items[:0] = items
+            del self._pending_items[VISIBLE_LOG_ROWS:]
+            return
         keep = VISIBLE_LOG_ROWS - len(items)
         if len(self.items) > keep:
             self.beginRemoveRows(QModelIndex(), keep, len(self.items) - 1)
@@ -115,6 +131,10 @@ class Rows[T](QAbstractTableModel):
         self.endInsertRows()
 
     def discard_oldest(self, item: T):
+        if self._pending_items is not None:
+            if self._pending_items and self._pending_items[-1] == item:
+                self._pending_items.pop()
+            return
         if self.items and self.items[-1] == item:
             row = len(self.items) - 1
             self.beginRemoveRows(QModelIndex(), row, row)
@@ -534,6 +554,8 @@ class MainWindow(QMainWindow):
         self.verify_selected.setToolTip("读取所选写入记录的原目标")
         self.verify_selected.clicked.connect(self._verify_selected_write)
         self.journal_view = JournalView(self.log_table, self.detail, "客户端 · 请求日志与报文")
+        self.journal_view.clear_requested.connect(self._clear_journal)
+        self.journal_view.clear_button.setToolTip("清空当前设备日志及本地历史；未选择设备时清空全部客户端日志")
         self.journal_view.actions.insertWidget(0, diagnostics)
         self.journal_view.actions.insertWidget(1, self.verify_selected)
         journal_layout.addWidget(self.journal_view, 1)
@@ -956,7 +978,7 @@ class MainWindow(QMainWindow):
 
     def _show_device_journal(self):
         if self._managed:
-            self.journal.reset(tuple(entry for entry in self._all_entries if self._entry_visible(entry)))
+            self.journal.reset(tuple(entry for entry in self._all_entries if self._entry_visible(entry)), force=True)
             self.detail.clear()
 
     def _entry_visible(self, entry):
@@ -966,6 +988,30 @@ class MainWindow(QMainWindow):
             return entry.device_id == self._active_device_id
         device = next((item for item in self._history.workspace.project.devices if item.id == self._active_device_id), None)
         return bool(device and entry.protocol == device.profile.protocol and entry.endpoint == device.profile.endpoint)
+
+    def _clear_journal(self):
+        scope = {}
+        if self._managed and self._active_device_id is not None:
+            device = next((item for item in self._history.workspace.project.devices
+                           if item.id == self._active_device_id), None)
+            if device is None:
+                return
+            scope = dict(device_id=device.id, protocol=device.profile.protocol, endpoint=device.profile.endpoint)
+        try:
+            if self._history is not None:
+                self._history.clear_log(**scope)
+        except (OSError, ValueError) as error:
+            self.feedback.setText(f"清空日志失败 · {error}")
+            return
+        self._all_entries[:] = [entry for entry in self._all_entries if not self._entry_visible(entry)]
+        self.journal.reset(force=True)
+        self.detail.clear()
+        now = datetime.now().astimezone()
+        self._log_retention = (replace(self._log_retention, rotated_at=now) if scope else LogRetention(rotated_at=now))
+        self._refresh_write_summary(force=True)
+        if self._diagnostics is not None:
+            self._diagnostics.close()
+        self.feedback.setText("已清空日志，新请求将继续记录。")
 
     def report_log(self) -> RetainedLog[JournalEntry]:
         return RetainedLog(tuple(self._all_entries), self._log_retention)
@@ -977,7 +1023,8 @@ class MainWindow(QMainWindow):
                 if self._history.append_entry(entry):
                     self._all_entries.clear()
                     self.journal.reset()
-                    self.detail.clear()
+                    if not self.journal_view.paused:
+                        self.detail.clear()
                     cleared = True
                     self._log_retention = replace(self._log_retention, rotated_at=datetime.now().astimezone(), clipped=False)
             except OSError:
@@ -996,7 +1043,8 @@ class MainWindow(QMainWindow):
         if (entry.write is not None or entry.verification is not None or cleared
                 or any(item is self._latest_write for item in expired)):
             self._refresh_write_summary(force=True)
-        if entry.verification is not None and self.log_table.currentIndex().isValid():
+        if (entry.verification is not None and not self.journal_view.paused
+                and self.log_table.currentIndex().isValid()):
             self._show_detail(self.log_table.currentIndex(), None)
 
     def _complete_removal(self, device_id):

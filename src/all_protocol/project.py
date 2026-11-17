@@ -164,9 +164,12 @@ def project_record(project: Project) -> dict:
     bits = (any(point.bit_definitions for table in project.point_tables for point in table.points)
             or any(point.bit_definitions for station in (*project.modbus.stations, *project.rtu.stations) for point in station.points)
             or any(point.bit_definitions for point in (*project.s7.points, *project.ua.points)))
-    ua = ua or recovery or bits or project.simulators is not None
+    extensions = any(station.extensions for station in project.modbus.stations) or any(
+        item.protocol == "modbus-tcp" and any(station.extensions for station in item.plan.stations)
+        for item in project.simulators or ())
+    ua = ua or recovery or bits or project.simulators is not None or extensions
     record = {
-        "format": "all-protocol-project", "schema_version": 8 if project.simulators is not None else 7 if bits else 6 if recovery else 5 if ua else 4, "name": project.name,
+        "format": "all-protocol-project", "schema_version": 9 if extensions else 8 if project.simulators is not None else 7 if bits else 6 if recovery else 5 if ua else 4, "name": project.name,
         "devices": [asdict(item) for item in project.devices],
         "servers": {"modbus-tcp": encode_modbus_plan(project.modbus), "s7": encode_s7_plan(project.s7),
                     "modbus-rtu": encode_rtu_plan(project.rtu)},
@@ -177,6 +180,10 @@ def project_record(project: Project) -> dict:
     if project.simulators is not None:
         record["simulators"] = [dict(id=item.id, name=item.name, protocol=item.protocol,
                                      plan=SERVER_CODECS[item.protocol][0](item.plan)) for item in project.simulators]
+    if (record["servers"]["modbus-tcp"]["schema_version"] >= 6 or any(
+            item["protocol"] == "modbus-tcp" and item["plan"]["schema_version"] >= 6
+            for item in record.get("simulators", []))):
+        record["schema_version"] = 10
     if project.layout is not None:
         record["workspace_layout"] = {"version": 1, **asdict(project.layout), "selection": list(project.layout.selection)}
     return record
@@ -185,7 +192,7 @@ def project_record(project: Project) -> dict:
 def decode_project(data) -> Project:
     try:
         if (not isinstance(data, dict) or data.get("format") != "all-protocol-project"
-                or type(data.get("schema_version")) is not int or data["schema_version"] not in (1, 2, 3, 4, 5, 6, 7, 8)):
+                or type(data.get("schema_version")) is not int or data["schema_version"] not in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)):
             raise ValueError("项目格式或版本无法识别")
         name = data["name"]
         if not isinstance(name, str) or not name.strip() or len(name) > 200:
@@ -226,6 +233,10 @@ def decode_project(data) -> Project:
                 plans.append(decode(servers[protocol]))
             except (KeyError, TypeError, ValueError, ClientError) as error:
                 raise ValueError(f"servers.{protocol}：{error}") from error
+        if data["schema_version"] < 9 and any(station.extensions for station in plans[0].stations):
+            raise ValueError("场景扩展须使用项目 v9")
+        if data["schema_version"] < 10 and servers["modbus-tcp"]["schema_version"] >= 6:
+            raise ValueError("点位取值或无条件规则须使用项目 v10")
         tables, table_ids, point_ids = [], set(), set()
         if data["schema_version"] == 1:
             if data.get("point_tables"):
@@ -250,7 +261,7 @@ def decode_project(data) -> Project:
             except (KeyError, TypeError, ValueError) as error:
                 raise ValueError(f"point_tables[{index}]：{error}") from error
         simulators = None
-        if data["schema_version"] >= 8:
+        if data["schema_version"] >= 8 and ("simulators" in data or data["schema_version"] == 8):
             raw = data["simulators"]
             if not isinstance(raw, list) or len(raw) > 64:
                 raise ValueError("模拟设备必须是列表，最多 64 个服务")
@@ -262,6 +273,10 @@ def decode_project(data) -> Project:
                         or item["id"] in seen or item["protocol"] not in SERVER_CODECS):
                     raise ValueError("模拟设备 ID、名称或协议无效，ID 不得重复")
                 plan = SERVER_CODECS[item["protocol"]][1](item["plan"])
+                if data["schema_version"] < 9 and item["protocol"] == "modbus-tcp" and any(s.extensions for s in plan.stations):
+                    raise ValueError("场景扩展须使用项目 v9")
+                if data["schema_version"] < 10 and item["protocol"] == "modbus-tcp" and item["plan"]["schema_version"] >= 6:
+                    raise ValueError("点位取值或无条件规则须使用项目 v10")
                 simulators.append(ProjectSimulator(item["id"], item["name"], item["protocol"], plan))
                 seen.add(item["id"])
             simulators = tuple(simulators)
@@ -372,6 +387,9 @@ class ProjectHistory:
     def read_log(self):
         return self.local.read_log()
 
+    def clear_log(self, **scope):
+        self.local.clear_log(**scope)
+
     def append_entry(self, entry):
         return self.local.append_entry(entry)
 
@@ -402,6 +420,9 @@ class ProjectServerStorage:
     def recent_events(self):
         # A local protocol journal may contain other projects and simulator instances.
         return ()
+
+    def clear_log(self, *, endpoint):
+        self.local.clear_log(endpoint=endpoint)
 
     def append_event(self, event):
         return self.local.append_event(event)

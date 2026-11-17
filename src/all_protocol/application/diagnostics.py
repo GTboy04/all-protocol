@@ -3,6 +3,7 @@ from datetime import datetime
 from math import ceil
 
 from .contracts import ErrorKind, JournalEntry, WriteStatus
+from .scenario_model import ScenarioEvent
 from .server_contracts import RequestMetadata, ServerEvent
 
 
@@ -81,6 +82,10 @@ class DiagnosticRow:
     @classmethod
     def from_server(cls, event: ServerEvent):
         payload = event.payload
+        if isinstance(payload, ScenarioEvent):
+            identity = f"扩展 {payload.extension_id} / {payload.rule_id} / 执行 #{payload.run_id}"
+            return cls(event.time, event.protocol, ("",), "场景引擎", "场景", f"{event.endpoint} · Unit {payload.unit_id}",
+                       "", payload.result, None, None, identity, f"计划 {payload.planned_ms} ms / 实际 {payload.actual_ms} ms", ())
         if not isinstance(payload, RequestMetadata):
             return cls(event.time, event.protocol, ("",), "—", "监听", event.endpoint, "", payload.result,
                        None, None, "", "", ())

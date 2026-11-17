@@ -1,6 +1,6 @@
 """Roomy, detachable request list and packet reader shared by both roles."""
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QTextOption
 from PySide6.QtWidgets import (
     QDialog, QHBoxLayout, QPlainTextEdit, QPushButton, QSplitter,
@@ -9,11 +9,15 @@ from PySide6.QtWidgets import (
 
 
 class JournalView(QWidget):
+    clear_requested = Signal()
+
     def __init__(self, table, detail, title):
         super().__init__()
         self._title = title
         self._dialog = None
         self._manual_orientation = False
+        self._table = table
+        self._detail = detail
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
@@ -30,6 +34,14 @@ class JournalView(QWidget):
         self.wrap_button.toggled.connect(lambda checked: detail.setLineWrapMode(
             QPlainTextEdit.LineWrapMode.WidgetWidth if checked else QPlainTextEdit.LineWrapMode.NoWrap))
         actions.addWidget(self.wrap_button)
+        self.pause_button = QPushButton("暂停输出")
+        self.pause_button.setCheckable(True)
+        self.pause_button.setToolTip("暂停列表刷新以阅读日志；通信和日志保存继续，恢复后显示最新日志")
+        self.pause_button.toggled.connect(self._set_paused)
+        actions.addWidget(self.pause_button)
+        self.clear_button = QPushButton("清空日志")
+        self.clear_button.clicked.connect(self.clear_requested)
+        actions.addWidget(self.clear_button)
         actions.addStretch()
         self.expand_button = QPushButton("独立窗口…")
         self.expand_button.setToolTip("在可最大化的独立窗口中阅读日志，关闭后回到原位置")
@@ -52,6 +64,23 @@ class JournalView(QWidget):
         self.placeholder.clicked.connect(self.open_window)
         layout.addWidget(self.placeholder)
         self.placeholder.hide()
+
+    @property
+    def paused(self):
+        return self.pause_button.isChecked()
+
+    def _set_paused(self, paused):
+        model = self._table.model()
+        index = self._table.currentIndex()
+        selected = model.items[index.row()] if index.isValid() else None
+        model.set_paused(paused)
+        self.pause_button.setText("恢复输出" if paused else "暂停输出")
+        if not paused:
+            self._detail.clear()
+            if selected is not None:
+                row = next((i for i, item in enumerate(model.items) if item is selected), None)
+                if row is not None:
+                    self._table.selectRow(row)
 
     def _toggle_orientation(self):
         self._manual_orientation = True

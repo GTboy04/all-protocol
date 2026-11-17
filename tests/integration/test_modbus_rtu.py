@@ -329,6 +329,8 @@ def test_rtu_write_verification_scene_and_report(cable, tmp_path):
             await client.execute(Command(ModbusRtuTarget(1, Area.HR, 0, 1), (23,), VerificationOptions(0, 0, 0)))
             entries = [event for event in events if isinstance(event, JournalEntry)]
             assert entries[-1].verification.status == VerificationStatus.MATCH
+            await server.reset_points()
+            assert await server.read_current(ModbusServerTarget(1, Area.HR, 0)) == 1
             history = LocalHistory(tmp_path)
             history.append_entry(entries[-1])
             assert history.recent_entries()[0] == entries[-1]

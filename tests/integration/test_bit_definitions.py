@@ -92,17 +92,20 @@ def test_bit_inspector_refreshes_meanings_and_does_not_invent_unsampled_values(q
     reading = [BitReading("状态", bit_pattern(1, "UInt16"), "有效", DEFINITIONS, "UInt16")]
     inspector = BitInspector(None, lambda: reading[0])
     try:
-        assert "运行" in inspector.cells[-1].text()
+        assert inspector.cells[-1].text() == "bit 0\n1"
+        assert inspector.cells[0].text() == "bit 15\n0"
+        assert "运行" not in inspector.cells[-1].toolTip()
         assert "当前含义：运行" in inspector.detail.text()
-        inspector._select(15)
+        inspector.cells[0].click()
         assert "当前含义：正常\n无故障" in inspector.detail.text()
         reading[0] = replace(reading[0], pattern=bit_pattern(0x8000, "UInt16"))
         inspector.refresh()
         assert "当前含义：故障" in inspector.detail.text()
-        assert "停止" in inspector.cells[-1].text()
+        assert inspector.cells[-1].text() == "bit 0\n0"
         reading[0] = replace(reading[0], pattern=None)
         inspector.refresh()
         assert len(inspector.cells) == 16
+        assert inspector.cells[0].text() == "bit 15\n—"
         assert "暂无采样值" in inspector.detail.text()
         assert "当前含义" not in inspector.detail.text()
         assert "故障" not in inspector.cells[0].text()

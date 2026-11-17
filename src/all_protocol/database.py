@@ -109,6 +109,9 @@ def set_meta(connection, key, value):
 
 def write_plan(connection, record):
     protocol = record["protocol"]
+    if protocol == "modbus-tcp":
+        set_meta(connection, "scenario_extensions:modbus-tcp", dumps({
+            str(station["unit_id"]): station["extensions"] for station in record["stations"] if station.get("extensions")}))
     if protocol == "opcua":
         set_meta(connection, "opcua-settings", dumps({key: record[key] for key in ("security", "namespace_uri")}))
     if protocol == "modbus-rtu":
@@ -153,6 +156,11 @@ def read_plan(connection, protocol):
                                   (protocol,))]
     else:
         record["points"] = groups.get(0, [])
+    if protocol == "modbus-tcp":
+        extensions = json.loads(get_meta(connection, "scenario_extensions:modbus-tcp") or "{}")
+        for station in record["stations"]:
+            if str(station["unit_id"]) in extensions:
+                station["extensions"] = extensions[str(station["unit_id"])]
     if protocol == "modbus-rtu":
         del record["host"], record["port"]
         record.update(json.loads(get_meta(connection, "modbus-rtu-settings")))

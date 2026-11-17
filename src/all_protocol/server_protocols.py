@@ -17,23 +17,27 @@ _RUNTIME_VALUES = frozenset({ServerCapability.READ_CURRENT, ServerCapability.WRI
 
 SERVER_PROTOCOLS = (
     DesktopServerProtocol(
-        ServerRegistration("modbus-tcp", "Modbus TCP", ModbusServerAdapter, _RUNTIME_VALUES,
-                           lambda plan: plan.simulation_points(configured_only=True)),
+        ServerRegistration("modbus-tcp", "Modbus TCP", ModbusServerAdapter, _RUNTIME_VALUES | {ServerCapability.STATION_CONTROL},
+                           lambda plan: plan.simulation_points(configured_only=True), lambda plan: plan.scenario_bindings(),
+                           reset_points=lambda plan: plan.simulation_points()),
         ModbusServerPane, ServerStorage, project_field="modbus",
     ),
     DesktopServerProtocol(
         ServerRegistration("s7", "Siemens S7", S7ServerAdapter, _RUNTIME_VALUES,
-                           lambda plan: plan.simulation_points(configured_only=True)),
+                           lambda plan: plan.simulation_points(configured_only=True),
+                           reset_points=lambda plan: plan.simulation_points()),
         S7ServerPane, S7ServerStorage, project_field="s7",
     ),
     DesktopServerProtocol(
         ServerRegistration("modbus-rtu", "Modbus RTU", RtuServerAdapter, _RUNTIME_VALUES,
-                           lambda plan: plan.simulation_points(configured_only=True)),
+                           lambda plan: plan.simulation_points(configured_only=True),
+                           reset_points=lambda plan: plan.simulation_points()),
         ModbusRtuServerPane, RtuServerStorage, project_field="rtu",
     ),
     DesktopServerProtocol(
         ServerRegistration("opcua", "OPC UA（本机模拟）", UaServerAdapter, _RUNTIME_VALUES,
-                           lambda plan: plan.simulation_points(configured_only=True)),
+                           lambda plan: plan.simulation_points(configured_only=True),
+                           reset_points=lambda plan: plan.simulation_points()),
         UaServerPane, UaServerStorage, project_field="ua",
     ),
 )

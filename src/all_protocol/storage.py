@@ -26,6 +26,7 @@ from .application.contracts import (
 from .application.journal import VISIBLE_LOG_ROWS, LogRetention, RetainedLog
 from .application.recovery import RecoveryPolicy
 from .application.server_contracts import LifecycleAction, RequestMetadata, ServerEvent, ServerLifecycle
+from .application.scenario_model import ScenarioEvent, decode_extension, extension_format_version, extension_record
 from .application.simulation import decode_rule
 from .bit_definitions import bit_definition_records, decode_bit_definitions
 from .point_tables import decode_target, target_record
@@ -217,6 +218,24 @@ def _read_database_log(directory, stream, legacy_path, decode):
             datetime.fromisoformat(rotated) if rotated else None, count > VISIBLE_LOG_ROWS, bool(incomplete)))
 
 
+def _clear_database_log(directory, stream, legacy_path, decode, *, endpoint=None, device_id=None, protocol=None):
+    with connect(directory / DATABASE_NAME) as connection:
+        _migrate_journal(connection, stream, legacy_path, decode)
+        where, parameters = "stream=?", [stream]
+        if device_id is not None:
+            where += (" AND (json_extract(payload, '$.device_id')=? OR "
+                      "(coalesce(json_extract(payload, '$.device_id'), '')='' AND protocol=? AND endpoint=?))")
+            parameters.extend((device_id, protocol, endpoint))
+        elif endpoint is not None:
+            where += " AND endpoint=?"
+            parameters.append(endpoint)
+        connection.execute("DELETE FROM journal_entries WHERE " + where, parameters)
+        connection.execute("UPDATE journal_state SET rotated_at=? WHERE stream=?",
+                           (datetime.now().astimezone().isoformat(), stream))
+        if endpoint is None and device_id is None:
+            connection.execute("UPDATE journal_state SET incomplete=0 WHERE stream=?", (stream,))
+
+
 def _append_database_log(directory, stream, legacy_path, decode, record):
     return _append_database_logs(directory, stream, legacy_path, decode, (record,))[0]
 
@@ -312,6 +331,10 @@ class LocalHistory:
     def read_log(self) -> RetainedLog[JournalEntry]:
         return _read_database_log(self.directory, "client", self.journal_path, _load_entry)
 
+    def clear_log(self, *, device_id=None, protocol=None, endpoint=None):
+        _clear_database_log(self.directory, "client", self.journal_path, _load_entry,
+                            device_id=device_id, protocol=protocol, endpoint=endpoint)
+
     def append_entry(self, entry: JournalEntry) -> bool:
         """Append an entry and report whether the previous journal was cleared."""
         record = asdict(entry)
@@ -376,6 +399,8 @@ class _ServerJournal:
         endpoint = _text(data, "endpoint")
         if data["kind"] == "lifecycle":
             payload = ServerLifecycle(LifecycleAction(data["action"]), _text(data, "result"))
+        elif data["kind"] == "scenario":
+            payload = ScenarioEvent(**data["scenario"])
         elif data["kind"] == "request":
             details = data["details"]
             if not isinstance(details, dict) or any(type(value) not in (str, int, bool, float, type(None))
@@ -391,6 +416,10 @@ class _ServerJournal:
 
     def read_log(self) -> RetainedLog[ServerEvent]:
         return _read_database_log(self.directory, self._journal_protocol, self.journal_path, self._decode_event)
+
+    def clear_log(self, *, endpoint=None):
+        _clear_database_log(self.directory, self._journal_protocol, self.journal_path,
+                            self._decode_event, endpoint=endpoint)
 
     def append_event(self, event: ServerEvent) -> bool:
         return self.append_events((event,))[0]
@@ -410,10 +439,12 @@ class _ServerJournal:
             record.update(kind="request", peer=payload.peer, result=payload.result, rx=payload.rx.hex(),
                           tx=payload.tx.hex(), details=dict(payload.details), elapsed_ms=payload.elapsed_ms,
                           error=payload.error, session_id=payload.session_id, request_id=payload.request_id)
+        elif isinstance(payload, ScenarioEvent):
+            record.update(kind="scenario", scenario=asdict(payload))
         elif isinstance(payload, ServerLifecycle):
             record.update(kind="lifecycle", action=payload.action, result=payload.result)
         else:
-            raise ValueError("Only request and lifecycle events can be stored")
+            raise ValueError("Only request, lifecycle and scenario events can be stored")
         return record
 
 
@@ -432,22 +463,27 @@ def _point_record(point) -> dict:
 
 def encode_modbus_plan(plan: ServerPlan) -> dict:
     stations = [{"unit_id": station.unit_id, "name": station.name,
-                 "points": [_point_record(point) for point in station.points]} for station in plan.stations]
+                 "points": [_point_record(point) for point in station.points],
+                 **({"extensions": [extension_record(e) for e in station.extensions]} if station.extensions else {})}
+                for station in plan.stations]
     has_rules = any("simulation" in point for station in stations for point in station["points"])
     has_bits = any("bit_definitions" in point for station in stations for point in station["points"])
-    return {"schema_version": 4 if has_bits else 3 if has_rules else 2, "protocol": "modbus-tcp",
+    extended_values = any(extension_format_version(e) >= 2 for station in plan.stations for e in station.extensions)
+    return {"schema_version": 6 if extended_values else 5 if any(station.extensions for station in plan.stations) else 4 if has_bits else 3 if has_rules else 2, "protocol": "modbus-tcp",
             "host": plan.host, "port": plan.port, "stations": stations}
 
 
 def decode_modbus_plan(data) -> ServerPlan:
     if (not isinstance(data, dict) or type(data.get("schema_version")) is not int
-            or data["schema_version"] not in (1, 2, 3, 4) or data.get("protocol") != "modbus-tcp"):
+            or data["schema_version"] not in (1, 2, 3, 4, 5, 6) or data.get("protocol") != "modbus-tcp"):
         raise ValueError("方案版本或协议无法识别")
     if not isinstance(data["stations"], list):
         raise ValueError("从站必须是列表")
     for station in data["stations"]:
         if not isinstance(station, dict) or not isinstance(station.get("points"), list):
             raise ValueError("从站点位必须是列表")
+    if data["schema_version"] < 5 and any(station.get("extensions") for station in data["stations"]):
+        raise ValueError("场景扩展须使用方案 v5")
     stations = tuple(
         Station(station["unit_id"], station["name"], tuple(
             ServerPoint(
@@ -458,10 +494,12 @@ def decode_modbus_plan(data) -> ServerPlan:
                 decode_bit_definitions(point.get("bit_definitions", [])),
             )
             for point in station["points"]
-        ))
+        ), tuple(decode_extension(item) for item in station.get("extensions", [])))
         for station in data["stations"]
     )
     plan = ServerPlan(data["host"], data["port"], stations)
+    if data["schema_version"] < 6 and any(extension_format_version(e) >= 2 for s in stations for e in s.extensions):
+        raise ValueError("点位取值或无条件规则须使用方案 v6")
     plan.validate()
     return plan
 

@@ -19,6 +19,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from .application.contracts import JournalEntry
 from .application.diagnostics import DiagnosticRow, request_stats
 from .application.journal import VISIBLE_LOG_ROWS, RetainedLog
+from .application.scenario_model import ScenarioEvent
 from .application.server_contracts import RequestMetadata, ServerEvent
 
 
@@ -221,6 +222,10 @@ def _record(entry, row, stream, zone, *, packets, device=None):
         if packets:
             record["packets"] = [{"direction": label, "hex": data.hex(" ").upper()}
                                  for label, data in (("RX", payload.rx), ("TX", payload.tx)) if data]
+    elif isinstance(payload, ScenarioEvent):
+        record.update(kind="scenario", server_details=asdict(payload))
+        if packets:
+            record["packets"] = []
     else:
         record.update(kind="lifecycle", server_details={"action": payload.action})
         if packets:

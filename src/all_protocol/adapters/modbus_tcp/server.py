@@ -16,6 +16,8 @@ from ...application.contracts import ErrorKind, Value
 from ...application.faults import FaultAction, FaultOperation
 from .model import RULES, Area
 from .server_model import ServerPlan
+from .server_model import ModbusServerTarget
+from ...application.scenario_model import PointCommit
 
 
 READ_AREAS = {rule.read_code: area for area, rule in RULES.items()}
@@ -51,7 +53,7 @@ class ServerRequest:
 class RuntimeValues:
     """Sparse zero-based datastore. Access stays on the server's asyncio loop."""
 
-    def __init__(self, plan: ServerPlan, changed: Callable[[ValuesChanged], None]):
+    def __init__(self, plan: ServerPlan, changed: Callable[[ValuesChanged], None], committed=None):
         self.stations = {
             station.unit_id: {
                 (point.area, address): word
@@ -64,7 +66,14 @@ class RuntimeValues:
             (station.unit_id, point.area, point.offset): point
             for station in plan.stations for point in station.points
         }
+        self._address_points = {
+            (unit, area, address): (unit, area, offset)
+            for (unit, area, offset), point in self.points.items() for address in point.addresses
+        }
+        self.active = set(self.stations)
         self.changed = changed
+        self.committed = committed
+        self.sequence = 0
 
     async def async_getValues(self, device_id, func_code, address, count=1):
         station = self.stations[device_id]
@@ -84,9 +93,29 @@ class RuntimeValues:
         keys = [(area, index) for index in range(offset, offset + len(values))]
         if any(key not in station for key in keys):
             return ExcCodes.ILLEGAL_ADDRESS
-        station.update(zip(keys, values, strict=True))
-        self.changed(ValuesChanged(unit_id, area, offset, values))
+        self.commit(((unit_id, area, offset, values),))
         return None
+
+    def commit(self, batches):
+        affected_keys = (dict.fromkeys(self._address_points[unit, area, address]
+                                      for unit, area, offset, values in batches
+                                      for address in range(offset, offset + len(values))) if self.committed else {})
+        affected = {key: self.points[key] for key in affected_keys}
+
+        def value(key, point):
+            unit, area, _ = key
+            return point.decode(tuple(self.stations[unit][area, address] for address in point.addresses))
+
+        before = {key: value(key, point) for key, point in affected.items()}
+        # All batches were encoded and validated by the caller; no callbacks until the entire batch is stored.
+        for unit, area, offset, values in batches:
+            self.stations[unit].update(((area, offset + index), word) for index, word in enumerate(values))
+        changes = tuple((ModbusServerTarget(*key), before[key], value(key, point)) for key, point in affected.items())
+        for unit, area, offset, values in batches:
+            self.changed(ValuesChanged(unit, area, offset, values))
+        self.sequence += 1
+        if self.committed is not None:
+            self.committed(PointCommit(self.sequence, changes))
 
 
 class _Connection(ServerRequestHandler):
@@ -198,10 +227,10 @@ class _Connection(ServerRequestHandler):
 
 
 class TcpServer(ModbusTcpServer):
-    def __init__(self, plan: ServerPlan, changed, record, fault=None):
+    def __init__(self, plan: ServerPlan, changed, record, fault=None, committed=None):
         super().__init__([], address=(plan.host, plan.port))
         # Use PyModbus PDU datastore operations with exact Unit IDs and sparse bit addresses.
-        self.context = RuntimeValues(plan, changed)
+        self.context = RuntimeValues(plan, changed, committed)
         self.record = record
         self.fault = fault
         self.requests: set[asyncio.Task] = set()
@@ -232,7 +261,7 @@ class TcpServer(ModbusTcpServer):
         code = pdu[0]
         if code not in AREAS:
             return ExceptionResponse(code, ExcCodes.ILLEGAL_FUNCTION)
-        if unit not in self.context.stations:
+        if unit not in self.context.active:
             return ExceptionResponse(code, ExcCodes.GATEWAY_NO_RESPONSE)
         if code in MULTI_WRITES:
             limit = RULES[WRITE_AREAS[code]].write_limit

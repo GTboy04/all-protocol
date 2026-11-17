@@ -87,3 +87,61 @@ def test_shallow_reader_adapts_but_preserves_explicit_layout_choice(reader):
     view.expand_button.click()
     app.processEvents()
     assert view._dialog is None and view.isAncestorOf(view.toolbar)
+
+
+def test_pause_freezes_selection_scroll_and_detached_reader(reader):
+    app, _, model, table, detail, view = reader
+    model.reset(tuple(f"请求 {i}" for i in range(100)))
+    table.selectRow(40)
+    detail.setPlainText("正在阅读的报文")
+    app.processEvents()
+    scroll = table.verticalScrollBar().value()
+    view.pause_button.click()
+    model.prepend_many(("新请求 2", "新请求 1"))
+    assert model.rowCount() == 100
+    assert table.currentIndex().data() == "请求 40"
+    assert table.verticalScrollBar().value() == scroll
+    assert detail.toPlainText() == "正在阅读的报文"
+    view.open_window()
+    assert view.paused and view.pause_button.text() == "恢复输出"
+    view._dialog.close()
+    view.pause_button.click()
+    assert model.items[:2] == ["新请求 2", "新请求 1"]
+    assert table.currentIndex().data() == "请求 40"
+    assert not view.paused
+
+
+def test_pause_retains_only_latest_rows_and_clears_expired_selection(reader):
+    from all_protocol.storage import VISIBLE_LOG_ROWS
+    _, _, model, table, detail, view = reader
+    model.prepend("旧请求")
+    table.selectRow(0)
+    detail.setPlainText("旧报文")
+    view.pause_button.click()
+    for i in range(VISIBLE_LOG_ROWS + 10):
+        model.prepend(str(i))
+    assert model.items == ["旧请求"]
+    view.pause_button.click()
+    assert model.rowCount() == VISIBLE_LOG_ROWS
+    assert model.items[0] == str(VISIBLE_LOG_ROWS + 9)
+    assert not table.currentIndex().isValid()
+    assert detail.toPlainText() == ""
+
+
+def test_rotation_is_deferred_and_explicit_clear_discards_paused_backlog(reader):
+    _, _, model, _, _, view = reader
+    model.prepend("旧请求")
+    view.pause_button.click()
+    model.reset()
+    model.prepend("轮换后请求")
+    assert model.items == ["旧请求"]
+    view.pause_button.click()
+    assert model.items == ["轮换后请求"]
+    view.pause_button.click()
+    model.prepend("待显示请求")
+    model.reset(force=True)
+    assert model.items == []
+    model.prepend("清空后请求")
+    assert model.items == []
+    view.pause_button.click()
+    assert model.items == ["清空后请求"]

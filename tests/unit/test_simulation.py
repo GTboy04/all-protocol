@@ -133,3 +133,27 @@ def test_runtime_failure_disables_only_that_rule_until_reset():
     scene.command(SimulationCommand.RESET)
     assert not scene.snapshot().faults
     assert writes[-2:] == [(first.target, 0), (second.target, 0)]
+
+
+@pytest.mark.parametrize("rule", (
+    SimulationRule(RuleKind.FIXED, value=7),
+    SimulationRule(RuleKind.TIMELINE, actions=(Assignment(0, 3), Assignment(100, 7))),
+))
+def test_disabled_station_skips_writes_and_resumes_at_current_scene_time(rule):
+    configured = point(DataType.UINT16, rule=rule)
+    now = 0.0
+    enabled = False
+    writes = []
+    simulation = Simulation((configured,), lambda: now, lambda target, value: writes.append(value),
+                            enabled=lambda target: enabled)
+    simulation.command(SimulationCommand.START)
+    simulation.tick()
+    assert writes == []
+    now = 0.2
+    enabled = True
+    simulation.tick()
+    assert writes == [7]
+    enabled = False
+    simulation.command(SimulationCommand.RESET)
+    assert writes == [7]
+    assert not simulation.snapshot().faults

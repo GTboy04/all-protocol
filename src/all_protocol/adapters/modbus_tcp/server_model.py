@@ -5,6 +5,7 @@ from ...bit_definitions import BitDefinition, validate_bit_definitions
 from ...application.simulation import SimulationPoint, SimulationRule, WriteSpan, compile_rule
 from .model import Area, data_types
 from .values import DataType, RegisterOrder
+from ...application.scenario_model import ScenarioExtension, validate_extensions
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +60,7 @@ class Station:
     unit_id: int
     name: str = ""
     points: tuple[ServerPoint, ...] = ()
+    extensions: tuple[ScenarioExtension, ...] = ()
 
     def validate(self):
         if type(self.unit_id) is not int or not 1 <= self.unit_id <= 255:
@@ -73,6 +75,7 @@ class Station:
                 if key in seen:
                     raise ValueError(f"站 {self.unit_id} 的 {point.area} / {address} 已存在")
                 seen.add(key)
+        validate_extensions(self)
 
     def add_points(self, area: Area, offset: int, count: int, initial: Value, name: str = "",
                    data_type: DataType | None = None, order: RegisterOrder = RegisterOrder.BIG):
@@ -102,7 +105,8 @@ class ServerPlan:
         source = next((station for station in self.stations if station.unit_id == source_id), None)
         if source is None:
             raise ValueError(f"源 Unit ID {source_id} 不存在")
-        copied = replace(source, unit_id=unit_id, name=name)
+        copied = replace(source, unit_id=unit_id, name=name,
+                         extensions=tuple(extension.copied() for extension in source.extensions))
         plan = replace(self, stations=self.stations + (copied,))
         plan.validate()
         return plan
@@ -134,3 +138,17 @@ class ServerPlan:
                 label = f"{point.name} · {address}" if point.name else address
                 yield SimulationPoint(target, label, point.initial, point.encode, span, point.value_type.floating,
                                       point.value_type == DataType.BOOL, point.simulation)
+
+    def scenario_bindings(self):
+        def target(unit, ref):
+            return ModbusServerTarget(unit, Area(ref.area), ref.offset)
+
+        for station in self.stations:
+            for extension in station.extensions:
+                for rule in extension.rules:
+                    # Unconditional rules use an output only to check station activity.
+                    anchor = rule.source if rule.op != "always" else rule.steps[0].values[0].target
+                    yield (station.unit_id, extension, rule, target(station.unit_id, anchor),
+                           tuple((step.at_ms, tuple((target(station.unit_id, item.target), item.value,
+                                                    target(station.unit_id, item.value_source) if item.value_source else None)
+                                                   for item in step.values)) for step in rule.steps))

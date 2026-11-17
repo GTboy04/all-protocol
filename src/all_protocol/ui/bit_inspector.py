@@ -86,7 +86,6 @@ class BitInspector(QDialog):
         self.binary.setText(f"{pattern.kind} · {pattern.width} bit · {pattern.hexadecimal}\n{pattern.binary}" if pattern
                             else "暂无可显示的位模式；请先读取数值。非有限浮点数无法从解码值还原原始位模式。")
         width = pattern.width if pattern else bit_width(reading.kind) if reading else 0
-        definitions = {item.bit: item for item in reading.definitions} if reading else {}
         available_height = self.screen().availableGeometry().height()
         max_grid_height = max(112, min(320, available_height - 400))
         self.bit_scroll.setFixedHeight(min(max_grid_height, max(90, ((width + 7) // 8) * 88)))
@@ -100,16 +99,10 @@ class BitInspector(QDialog):
                 self.cells.append(cell)
         for cell, bit in zip(self.cells, range(width - 1, -1, -1)):
             value = pattern.bit(bit) if pattern else None
-            definition = definitions.get(bit)
-            name = definition.name if definition else ""
-            meaning = definition.meaning(value) if definition and value is not None else ""
-            short = lambda text: cell.fontMetrics().elidedText(text.replace("\n", " "), Qt.TextElideMode.ElideRight, 85)
             label = f"bit {bit} · {value if value is not None else '—'}"
-            cell.setText(label + f"\n{short(name)}\n{short(meaning)}" if definition
-                         else f"bit {bit}\n{value if value is not None else '—'}")
-            cell.setAccessibleName(f"{label} {name} {meaning}".strip())
-            cell.setToolTip(f"{label}；掩码 0x{1 << bit:X}" +
-                            (f"\n{name}\n0 = {definition.zero}\n1 = {definition.one}" if definition else "\n未定义业务含义"))
+            cell.setText(f"bit {bit}\n{value if value is not None else '—'}")
+            cell.setAccessibleName(label)
+            cell.setToolTip(f"{label}；掩码 0x{1 << bit:X}")
             cell.setProperty("bitValue", str(value) if value is not None else "unknown")
             cell.style().unpolish(cell)
             cell.style().polish(cell)
