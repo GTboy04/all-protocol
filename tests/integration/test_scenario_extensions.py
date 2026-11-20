@@ -117,6 +117,64 @@ def test_reset_all_points_stops_scenes_and_restores_unruled_sources():
     asyncio.run(run())
 
 
+def test_selected_reset_cancels_related_sequence_and_keeps_other_station_running():
+    async def run():
+        plan, now = config(base=True), 100.0
+        session = ServerSession(lambda _: None, SERVER_PROTOCOLS[0].registration, clock=lambda: now)
+        peer = TcpPeer()
+        await session.start(plan)
+        await peer.connect(plan)
+        try:
+            await session.control_simulation(SimulationCommand.START)
+            await peer.write(7, 0, 10)
+            await peer.write(8, 0, 10)
+            assert await peer.read(7) == await peer.read(8) == 1
+            await session.reset_point(ModbusServerTarget(7, Area.HR, 10))
+            assert await peer.read(7) == 0
+            assert await peer.read(7, 0) == 10
+            now = 102
+            session._simulation.tick()
+            session._scenario.tick()
+            assert await peer.read(7) == 0
+            assert await peer.read(8) == 2
+            assert session._scenario.running
+        finally:
+            await peer.close()
+            await session.stop()
+    asyncio.run(run())
+
+
+def test_selected_reset_does_not_trigger_source_condition():
+    async def run():
+        plan = config()
+        stations = []
+        for station in plan.stations:
+            original = station.extensions[0]
+            extension = check_extension(station, replace(original, rules=(replace(original.rules[0], value=0),)))
+            stations.append(replace(station, extensions=(extension,)))
+        plan = replace(plan, stations=tuple(stations))
+        events = []
+        session = ServerSession(events.append, SERVER_PROTOCOLS[0].registration)
+        await session.start(plan)
+        try:
+            await session.control_simulation(SimulationCommand.START)
+            source = ModbusServerTarget(7, Area.HR, 0)
+            await session.write_current(source, 10)
+            await session.reset_point(source)
+            session._scenario.tick()
+            assert await session.read_current(source) == 0
+            assert not any(isinstance(e.payload, ScenarioEvent) and e.payload.action == "started" for e in events)
+            await session.reset_point(ModbusServerTarget(7, Area.HR, 999))
+            assert "点位不存在" in events[-1].payload.error
+            await session.set_station_active(7, False)
+            await session.reset_point(source)
+            assert "从站未启动" in events[-1].payload.error
+            assert not session._pending_point_resets
+        finally:
+            await session.stop()
+    asyncio.run(run())
+
+
 def test_real_tcp_trigger_sequence_pause_station_isolation_and_cancellation():
     async def run():
         plan = config()

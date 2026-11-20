@@ -516,6 +516,9 @@ def test_simulator_independent_client_scenarios_and_subscriptions(tmp_path):
             await until(lambda: notifications)
             await server.write_current(target, 7)
             await until(lambda: any(point and point.value == 7 for point, _ in notifications))
+            await server.reset_point(target)
+            await until(lambda: any(point and point.value == 2 for point, _ in notifications))
+            assert await server.read_current(target) == 2
             await server.reset_points()
             await until(lambda: any(point and point.value == 2 for point, _ in notifications))
             assert await server.read_current(target) == 2

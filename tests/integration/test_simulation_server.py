@@ -56,6 +56,43 @@ def test_rules_round_trip_through_local_plans_and_project(tmp_path):
 
 
 @pytest.mark.parametrize("index", (0, 1), ids=("modbus", "s7"))
+def test_selected_reset_holds_only_target_and_keeps_other_simulation_running(index):
+    async def run():
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        plan = (modbus_plan if index == 0 else s7_plan)(port)
+        points = tuple(plan.simulation_points())
+        events, now = [], 100.0
+        session = ServerSession(events.append, SERVER_PROTOCOLS[index].registration, clock=lambda: now)
+        await session.start(plan)
+        try:
+            await session.control_simulation(SimulationCommand.START)
+            assert await session.read_current(points[0].target) == 1
+            await session.reset_point(points[0].target)
+            assert await session.read_current(points[0].target) == 0
+            now = 100.4
+            session._simulation.tick()
+            assert await session.read_current(points[0].target) == 0
+            assert await session.read_current(points[1].target) == 1
+            assert await session.read_current(points[2].target) > 0
+            # Includes a multi-register Modbus value and neighboring S7 bits.
+            await session.reset_point(points[2].target)
+            assert await session.read_current(points[2].target) == 0
+            assert await session.read_current(points[1].target) == 1
+            assert session._simulation_task is not None
+            assert session._state == ListenerState.LISTENING
+            await session.control_simulation(SimulationCommand.RELEASE, points[0].target)
+            session._simulation.tick()
+            assert await session.read_current(points[0].target) == 1
+        finally:
+            await session.stop()
+        await session.reset_point(points[0].target)
+        assert "服务未监听" in events[-1].payload.error
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("index", (0, 1), ids=("modbus", "s7"))
 def test_clients_read_start_feedback_ramp_and_takeover(index):
     async def run():
         with socket.socket() as reservation:
