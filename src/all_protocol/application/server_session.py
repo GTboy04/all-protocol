@@ -256,6 +256,37 @@ class ServerSession:
         if self._state == ListenerState.LISTENING:
             self._faults.configure(rule)
 
+    async def reset_point(self, target: object):
+        """Restore one point and hold it like a manual edit, without restarting scenes."""
+        async with self._lifecycle:
+            try:
+                self._active_adapter(ServerCapability.WRITE_CURRENT)
+                point = next((point for point in self._reset_points if point.target == target), None)
+                if point is None:
+                    raise ValueError("点位不存在或协议不支持重置点位")
+                if not self._target_active(target):
+                    raise ValueError("从站未启动")
+                # Cancel only sequences controlling this output. A reset must not
+                # trigger new condition edges or be overwritten on the next tick.
+                if self._scenario is not None:
+                    self._scenario.manual(point.span)
+                if self._simulation is not None:
+                    self._simulation.take_over(point.span)
+                previous, self._write_origin = self._write_origin, "reset"
+                try:
+                    self._write_current(target, point.initial)
+                finally:
+                    self._write_origin = previous
+                if self._simulation is not None:
+                    self._publish(self._simulation_snapshot())
+                if self._scenario is not None:
+                    self._publish(self._scenario.snapshot())
+                self._publish(ServerLifecycle(LifecycleAction.POINTS_RESET,
+                                             f"已重置所选点位 · {point.label} · 初始值 {point.initial}"))
+                self._update(self._state)
+            except ValueError as error:
+                self._update(self._state, f"重置所选点位失败 · {error}")
+
     async def control_simulation(self, command: SimulationCommand, target=None):
         simulation = self._simulation
         if self._state != ListenerState.LISTENING or simulation is None:

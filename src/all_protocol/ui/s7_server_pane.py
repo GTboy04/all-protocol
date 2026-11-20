@@ -82,6 +82,7 @@ class S7ServerPane(ServerPane):
         actions.addStretch()
         self.bit_button = self._button(actions, "位查看…", lambda: show_bit_inspector(self, self._bit_reading))
         self.edit_value = self._button(actions, "修改当前值", self._edit_current)
+        self.reset_selected = self._add_reset_selected_button(actions)
         self.plan_controls = (self.save, self.add_point, self.edit_point, self.remove_point)
         layout.addLayout(actions)
         journal = self._journal_panel(("时间", "来源客户端", "功能码", "目标", "结果"), _request_row,
@@ -265,3 +266,4 @@ class S7ServerPane(ServerPane):
         self.edit_point.setEnabled(idle and selected)
         self.remove_point.setEnabled(idle and selected)
         self.edit_value.setEnabled(running and selected)
+        self.reset_selected.setEnabled(self.edit_value.isEnabled())

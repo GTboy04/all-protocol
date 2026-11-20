@@ -132,6 +132,20 @@ class ServerPane(QWidget):
             self._feedback("")
             self.bridge.submit(self.bridge.session.reset_points())
 
+    def _add_reset_selected_button(self, layout):
+        button = self._button(layout, "重置所选点位", self._reset_selected_point)
+        button.setToolTip("将所选点位恢复为配置初始值并保持手动接管；取消控制该点位的联动，其他场景继续运行")
+        return button
+
+    def _selected_point_target(self):
+        return self._point.target if self._point is not None else None
+
+    def _reset_selected_point(self):
+        target = self._selected_point_target()
+        if self.state == ListenerState.LISTENING and target is not None:
+            self._feedback("")
+            self.bridge.submit(self.bridge.session.reset_point(target))
+
     def _refresh_fault(self):
         update = self.fault_update
         running = self.state == ListenerState.LISTENING
@@ -193,6 +207,7 @@ class ServerPane(QWidget):
         for control in self.plan_controls:
             control.setVisible(not current)
         self.edit_value.setVisible(current)
+        self.reset_selected.setVisible(current)
 
     @staticmethod
     def _button(layout, title, slot):

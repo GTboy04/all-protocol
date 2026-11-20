@@ -134,6 +134,7 @@ class ModbusServerPane(ServerPane):
         point_actions.addStretch()
         self.bit_button = self._button(point_actions, "位查看…", lambda: show_bit_inspector(self, self._bit_reading))
         self.edit_value = self._button(point_actions, "修改当前值", self._edit_current)
+        self.reset_selected = self._add_reset_selected_button(point_actions)
         self.plan_controls = (self.save, self.add_station, self.edit_station, self.remove_station, self.copy_station,
                               self.import_points, self.export_points,
                               self.add_point, self.batch_points, self.edit_point, self.remove_point)
@@ -519,6 +520,7 @@ class ModbusServerPane(ServerPane):
         for control in (self.edit_point, self.remove_point):
             control.setEnabled(idle and self._point is not None)
         self.edit_value.setEnabled(running and self._station_running() and self._point is not None)
+        self.reset_selected.setEnabled(self.edit_value.isEnabled())
         if self.independent_stations:
             selected = self._station
             active = selected is not None and selected.unit_id in self._active_stations
@@ -531,6 +533,10 @@ class ModbusServerPane(ServerPane):
         return (self.state in (ListenerState.LISTENING, ListenerState.STOPPING)
                 and (not self.independent_stations or
                      self._station is not None and self._station.unit_id in self._active_stations))
+
+    def _selected_point_target(self):
+        point, station = self._point, self._station
+        return ModbusServerTarget(station.unit_id, point.area, point.offset) if point and station else None
 
     def _station_labels(self):
         if not self.independent_stations:
